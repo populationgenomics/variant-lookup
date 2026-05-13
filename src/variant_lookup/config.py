@@ -24,6 +24,10 @@ class Settings(BaseSettings):
         ...,
         description="Path to the encoded gnomAD echtvar archive inside the container.",
     )
+    refseq_cache_path: Path = Field(
+        Path("/data/refseq/refseq_processed.json"),
+        description="Processed RefSeq MANE-Select / Select index (built by setup.sh refresh-refseq).",
+    )
     ncbi_eutils_email: str = Field(..., description="Required by NCBI E-utils.")
     ncbi_eutils_api_key: str | None = Field(
         None,

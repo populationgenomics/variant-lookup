@@ -2,7 +2,7 @@
 
 from typing import Annotated, Any
 
-from fastapi import Depends, FastAPI, HTTPException, status
+from fastapi import Depends, FastAPI, HTTPException, Response, status
 
 from variant_lookup import __version__
 from variant_lookup.auth import require_api_key
@@ -27,8 +27,14 @@ def create_app() -> FastAPI:
         return healthz()
 
     @app.get("/readyz")
-    def _readyz(settings: Annotated[Settings, Depends(get_settings)]) -> dict[str, Any]:
-        return readyz(settings)
+    def _readyz(
+        settings: Annotated[Settings, Depends(get_settings)],
+        response: Response,
+    ) -> dict[str, Any]:
+        result = readyz(settings)
+        if result["status"] != "ready":
+            response.status_code = status.HTTP_503_SERVICE_UNAVAILABLE
+        return result
 
     @app.post(
         "/v1/variants",
