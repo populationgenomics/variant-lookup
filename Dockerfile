@@ -67,4 +67,12 @@ ENV PATH="/app/.venv/bin:$PATH" \
 
 EXPOSE 8000
 
-CMD ["uvicorn", "variant_lookup.main:app", "--host", "0.0.0.0", "--port", "8000"]
+# Invoke uvicorn through the venv's python directly rather than via the
+# uvicorn entry-point script. uv writes absolute shebangs (e.g.
+# `#!/build/.venv/bin/python`) that reference the builder stage's path —
+# after COPY into /app/.venv the shebang target no longer exists in the
+# runtime image and exec fails with "no such file or directory". /app/.venv
+# /bin/python is a symlink to /usr/local/bin/python3 which exists, and
+# Python detects the venv from the adjacent pyvenv.cfg so site-packages
+# is the venv's.
+CMD ["/app/.venv/bin/python", "-m", "uvicorn", "variant_lookup.main:app", "--host", "0.0.0.0", "--port", "8000"]
