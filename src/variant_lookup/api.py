@@ -2,7 +2,8 @@
 
 from typing import Annotated, Any
 
-from fastapi import Depends, FastAPI, HTTPException, Response, status
+import httpx
+from fastapi import Depends, FastAPI, HTTPException, Request, Response, status
 
 from variant_lookup import __version__, echtvar, mutalyzer_client
 from variant_lookup.auth import require_api_key
@@ -72,6 +73,25 @@ def create_app() -> FastAPI:
                 status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
                 detail={"code": e.code, "message": e.message},
             ) from e
+
+    @app.get(
+        "/variantvalidator/{full_path:path}",
+        dependencies=[Depends(require_api_key)],
+    )
+    def _vv_passthrough(
+        full_path: str,
+        request: Request,
+        settings: Annotated[Settings, Depends(get_settings)],
+    ) -> Response:
+        """Drop-in proxy to the sibling VV REST service. Unstable contract."""
+        upstream_url = f"{settings.vv_base_url.rstrip('/')}/{full_path}"
+        with httpx.Client(timeout=60.0) as client:
+            upstream = client.get(upstream_url, params=request.query_params)
+        return Response(
+            content=upstream.content,
+            status_code=upstream.status_code,
+            media_type=upstream.headers.get("content-type"),
+        )
 
     @app.post(
         "/echtvar/frequencies",

@@ -24,6 +24,7 @@ dependencies = [
     "structlog>=24.4",
     "mutalyzer>=3.1.1",
     "setuptools<81",
+    "defusedxml>=0.7.1",
 ]
 
 [dependency-groups]
@@ -33,6 +34,7 @@ dev = [
     "mypy>=1.13",
     "pytest>=8.3",
     "types-PyYAML>=6.0",
+    "respx>=0.23.1",
 ]
 
 [tool.hatch.build.targets.wheel]
