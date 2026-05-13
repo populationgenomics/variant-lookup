@@ -52,14 +52,14 @@ WORKDIR /app
 COPY --from=builder /build/.venv /app/.venv
 COPY --from=builder /build/src /app/src
 
-# Run as non-root. Builder-stage files in /app are world-readable + world-
-# executable from the default umask, so a non-privileged user can read the
-# venv + source and exec python. The only writable mount in the gateway is
-# /data/mutalyzer (a docker-managed named volume in our compose, so docker
-# initialises ownership to this UID on first mount).
-RUN groupadd --system --gid 1000 app \
-    && useradd --system --uid 1000 --gid 1000 --no-create-home --shell /usr/sbin/nologin app
-USER 1000:1000
+# We deliberately leave USER unset (i.e. root). Bind-mounted reference data
+# under /data is owned by the host operator with group-only perms (mode 0770),
+# and matching the host UID inside the container would require per-deployment
+# .env wiring. Root reads any UID/GID via the bind mount, so we sidestep that.
+# The only writable path is /data/mutalyzer, which our compose backs with a
+# docker-managed named volume — root-owned files there live inside docker's
+# volume store, not on the host bind mount surface, so there's no host-side
+# ownership cleanup to do later.
 
 ENV PATH="/app/.venv/bin:$PATH" \
     PYTHONPATH="/app/src" \
