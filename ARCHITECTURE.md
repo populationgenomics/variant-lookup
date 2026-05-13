@@ -31,11 +31,20 @@ Two services in compose (plus an nginx sidecar for TLS):
 
 Mutalyzer is **in-process** because the library is MIT-licensed and importable. echtvar is **subprocess** because it's a CLI tool and the per-batch overhead (~10-30ms for fork + binary load) is irrelevant at our target throughput. VariantValidator is **HTTP-only across a container boundary** because it is AGPL — see §"AGPL boundary".
 
-VariantValidator's own deployment has internal dependencies (MySQL + PostgreSQL + SeqRepo containers) that come from the upstream `docker-compose.yml`. We **vendor four upstream repos under `vendor/`** at pinned SHAs (rest_variantValidator, variantValidator, variantFormatter, vv_hgvs — see `.env.example`) and bring the upstream compose stack up alongside ours. The vendored sources are **not part of our service** — they belong to the AGPL surface and live outside `src/`.
+VariantValidator's deployment has internal dependencies (MySQL + PostgreSQL + SeqRepo containers) that come from the upstream `docker-compose.yml`. We **vendor `rest_variantValidator` under `vendor/`** and bring the upstream compose stack up alongside ours. The vendored sources are **not part of our service** — they belong to the AGPL surface and live outside `src/`.
 
-Tagged releases of these repos lag well behind production (e.g. `variantValidator` v3.0.1 vs. the v3.0.2+dev that `rest.variantvalidator.org` runs), so pinning master HEADs at the time of deploy gives us a build closer to upstream production than any tag would. Pinned SHAs in `.env` are the source of truth; bump them deliberately when adopting upstream changes.
+**We track upstream `master` for the VV stack, not a pinned SHA.** This is a forced compromise, not a choice: `rest_variantValidator/pyproject.toml` pins its three sub-libraries (`vvhgvs`, `VariantFormatter`, `VariantValidator`) to `@master`, so `pip install -e .` in their Dockerfile pulls each one's current master HEAD at image build time. The only way to lock those transitive versions would be to patch upstream's `pyproject.toml` — a modification that triggers AGPL §13 on the resulting image. So pinning a SHA on the REST wrapper alone would give us a false sense of reproducibility while the three sub-libraries float anyway. We accept the float across all four repos and capture actually-deployed versions by reading them from the running service's `/` banner at gateway startup (surfaced in `/v1/variants` responses' `meta.variantvalidator`).
 
-**Note for future contributors**: the SHA strings the public `rest.variantvalidator.org` banner shows for `rest_variantValidator` and `variantValidator` (e.g. `7edab06bc`, `b64f3e1fb` as of mid-2026) are **not reachable** in the public openvar repos — they appear to live on a private branch or fork. `variantFormatter` and `vv_hgvs` prod SHAs *are* on public master. Don't waste time hunting the missing ones; pin current public master HEADs (or a deliberately chosen older public commit) instead.
+This is genuinely unsatisfactory — every rebuild is potentially a different stack. Two paths out, neither in scope for v1:
+
+- **Fork the VV repos** under AGPL and pin transitive deps in the fork. Our gateway code stays MIT because the network boundary still holds; we just take on the maintenance burden of a fork.
+- **Replace VariantValidator** entirely with a permissively-licensed alternative. Candidates:
+  - [`hgvs-weaver`](https://github.com/folded/hgvs-weaver) — MIT, Rust-backed Python library, type-safe coordinate handling, supports g/c/p parsing + mapping + normalization. Likely the strongest fit, but doesn't cover cross-assembly liftover yet, so a replacement plan would have to add that upstream or layer a separate liftover step (CrossMap / pyliftover). Restricting inputs to GRCh38 is not acceptable — see §"Pipeline" step 5.
+  - biocommons `hgvs` (Apache-2.0) — mature, Python-only, but doesn't cover everything VV does out of the box (e.g. MANE-select transcript selection).
+
+The replacement path is the higher-priority longer-term change.
+
+**Note for future contributors**: the SHA strings the public `rest.variantvalidator.org` banner shows for `rest_variantValidator` and `variantValidator` (e.g. `7edab06bc`, `b64f3e1fb` as of mid-2026) are **not reachable** in the public openvar repos — they live on a private branch or fork. The production VV-stack is not bit-for-bit reproducible from public sources, even if we wanted to be.
 
 ## Public API
 
@@ -159,11 +168,9 @@ NGINX_PORT=9443                           # external HTTPS port
 NCBI_EUTILS_EMAIL=...                     # required by NCBI
 NCBI_EUTILS_API_KEY=...                   # optional, raises NCBI rate limit
 
-# Pinned upstream VariantValidator SHAs (AGPL — see "AGPL boundary")
-VV_REST_SHA=...
-VV_LIB_SHA=...
-VV_FORMATTER_SHA=...
-VV_HGVS_SHA=...
+# (No VariantValidator SHA pins — we track upstream master across the stack
+# because we can't lock transitive deps without patching AGPL code.
+# See "What runs where" for the rationale.)
 
 # Pinned echtvar precompiled release (for the gateway image build)
 ECHTVAR_VERSION=v0.2.4
@@ -204,7 +211,7 @@ Reference data is **manually refreshed** in v1. A single `scripts/setup.sh` scri
 | echtvar archive | gnomAD release notes | gnomAD point releases (rare) | `refresh-echtvar` | ~1-2 h sequential encode of 24 chromosome VCFs |
 | refseq_processed.json | NCBI RefSeq GFF | New GRCh38 patch (every ~6 mo) | `refresh-refseq` | minutes |
 | Mutalyzer cache | NCBI on first use | Auto-warmed; manual flush if NCBI changes a record | n/a (auto) | n/a |
-| VV seqdata / vvta / vdb | VV upstream pinned SHAs | When bumping any `VV_*_SHA` | `vendor-vv` + `build-vv` | ~1 h compile + ~30 min db init |
+| VV seqdata / vvta / vdb | VV upstream master | Re-running `vendor-vv` fetches latest master | `vendor-vv` + `build-vv` | ~1 h compile + ~30 min db init |
 
 ## Versioning
 
@@ -260,11 +267,11 @@ Neither is in scope for v1.
 
 ### `variantvalidator` (vendored upstream sources)
 
-- Four upstream repos (`rest_variantValidator`, `variantValidator`, `variantFormatter`, `vv_hgvs`) cloned under `vendor/` at SHAs pinned in `.env`. `scripts/setup.sh vendor-vv` checks them out; `scripts/setup.sh build-vv` builds their docker images.
+- `rest_variantValidator` cloned under `vendor/` at `origin/master`. `scripts/setup.sh vendor-vv` checks it out; `scripts/setup.sh build-vv` builds its docker images.
+- The image build pulls `variantValidator`, `variantFormatter`, and `vv_hgvs` from each repo's master HEAD via pip — see "What runs where" for why we don't pin.
 - Includes the VV REST API container, MySQL, PostgreSQL (UTA), and SeqRepo.
 - Bind-mounts from `${DATA_DIR}/variantvalidator/*` for persistence.
 - Health-checked by the gateway's `/readyz`.
-- **Pin master HEADs, not tags** — tagged releases lag production by months. See `.env.example` for the current pinned set.
 
 ### `nginx` (sidecar)
 

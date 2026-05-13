@@ -22,10 +22,6 @@ ENV_FILE="${REPO_ROOT}/.env"
 set -a; . "${ENV_FILE}"; set +a
 
 : "${DATA_DIR:?DATA_DIR must be set in .env}"
-: "${VV_REST_SHA:?VV_REST_SHA must be set in .env}"
-: "${VV_LIB_SHA:?VV_LIB_SHA must be set in .env}"
-: "${VV_FORMATTER_SHA:?VV_FORMATTER_SHA must be set in .env}"
-: "${VV_HGVS_SHA:?VV_HGVS_SHA must be set in .env}"
 
 VENDOR_DIR="${REPO_ROOT}/vendor"
 IMAGE_TAG="variant-lookup-gateway:latest"
@@ -40,26 +36,26 @@ require_gateway_image() {
 }
 
 vendor_vv() {
-    log "Vendoring VariantValidator (AGPL-3.0-only) at pinned SHAs"
+    # We track upstream master because we have to, not because we want to.
+    # rest_variantValidator's pyproject.toml pins its three sub-libraries to
+    # `@master`, so pip installs whatever's on master HEAD at image build
+    # time regardless of what we'd pin here. The only way to lock the stack
+    # transitively would be to patch upstream's pyproject.toml — which is a
+    # modification that triggers AGPL §13. So we accept the float.
+    # See ARCHITECTURE.md § "AGPL boundary" — replacing VV with a permissively
+    # licensed alternative is the longer-term plan.
+    log "Vendoring rest_variantValidator (AGPL-3.0-only) at master HEAD"
     mkdir -p "${VENDOR_DIR}"
-    local entries=(
-        "rest_variantValidator:${VV_REST_SHA}"
-        "variantValidator:${VV_LIB_SHA}"
-        "variantFormatter:${VV_FORMATTER_SHA}"
-        "vv_hgvs:${VV_HGVS_SHA}"
-    )
-    for entry in "${entries[@]}"; do
-        local name="${entry%%:*}"
-        local sha="${entry##*:}"
-        local dir="${VENDOR_DIR}/${name}"
-        if [ -d "${dir}/.git" ]; then
-            git -C "${dir}" fetch --quiet origin
-        else
-            git clone --quiet "https://github.com/openvar/${name}" "${dir}"
-        fi
-        git -C "${dir}" checkout --quiet --detach "${sha}"
-        printf '    %-26s @ %s\n' "${name}" "${sha}"
-    done
+    local dir="${VENDOR_DIR}/rest_variantValidator"
+    if [ -d "${dir}/.git" ]; then
+        git -C "${dir}" fetch --quiet origin master
+    else
+        git clone --quiet "https://github.com/openvar/rest_variantValidator" "${dir}"
+    fi
+    git -C "${dir}" checkout --quiet --detach origin/master
+    local sha
+    sha="$(git -C "${dir}" rev-parse HEAD)"
+    log "    rest_variantValidator @ ${sha}"
 }
 
 build_vv() {
