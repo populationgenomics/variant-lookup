@@ -84,15 +84,26 @@ refresh_echtvar() {
     local build="${DATA_DIR}/echtvar/build"
     mkdir -p "${stage}" "${build}"
 
+    # Override the AWS CLI's default 10-concurrent / 8 MB chunk-size — too
+    # conservative across the cross-Pacific link. There's no env-var path
+    # for these s3 tuning settings; they have to live in a config file.
+    cat > "${stage}/.aws-config" <<'AWS_CONFIG'
+[default]
+s3 =
+    max_concurrent_requests = 50
+    max_queue_size = 10000
+    multipart_chunksize = 16MB
+    multipart_threshold = 16MB
+AWS_CONFIG
+
     log "Syncing gnomAD v4.1 joint VCFs from S3 to ${stage}"
-    # aws s3 sync handles parallel multipart downloads, retries, and resumes
-    # (skips files already present at the matching size). Public bucket, so
-    # --no-sign-request avoids needing AWS credentials. HOME=/tmp because we
-    # run as the host UID, which has no entry in the container's /etc/passwd
-    # and so no home directory the CLI can write its cache into.
+    # Public bucket, so --no-sign-request avoids needing AWS credentials.
+    # HOME=/tmp because we run as the host UID, which has no entry in the
+    # container's /etc/passwd and so no home dir the CLI could write into.
     docker run --rm \
         --user "$(id -u):$(id -g)" \
         -e HOME=/tmp \
+        -e AWS_CONFIG_FILE=/stage/.aws-config \
         -v "${stage}:/stage" \
         "amazon/aws-cli:${AWS_CLI_VERSION}" \
         s3 sync s3://gnomad-public-us-east-1/release/4.1/vcf/joint/ /stage/ \
