@@ -14,7 +14,7 @@ Wires the components landed in Phases 1-5 into the end-to-end chain that
 import datetime
 from dataclasses import dataclass
 
-from variant_lookup import __version__, echtvar, mutalyzer_client, ncbi, normalize
+from variant_lookup import __version__, echtvar, mutalyzer_client, ncbi, normalize, versions
 from variant_lookup.config import Settings
 from variant_lookup.models import (
     NormalizedVariant,
@@ -170,8 +170,8 @@ class Pipeline:
             service=self.settings.service_version or __version__,
             reference="GRCh38",
             gnomad=self.settings.gnomad_version,
-            variantvalidator=self.settings.variantvalidator_version,
-            mutalyzer=self.settings.mutalyzer_version,
+            variantvalidator=versions.variantvalidator_version(self.settings.vv_base_url),
+            mutalyzer=versions.mutalyzer_version(),
             timestamp=datetime.datetime.now(tz=datetime.UTC).isoformat(),
         )
 

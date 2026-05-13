@@ -39,8 +39,6 @@ class Settings(BaseSettings):
 
     service_version: str = "0.1.0+dev"
     gnomad_version: str = "4.1"
-    variantvalidator_version: str = "unknown"
-    mutalyzer_version: str = "unknown"
 
 
 @lru_cache(maxsize=1)

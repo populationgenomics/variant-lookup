@@ -183,8 +183,9 @@ ECHTVAR_VERSION=v0.2.4
 # Versions stamped into responses
 SERVICE_VERSION=0.1.0+<git-sha>
 GNOMAD_VERSION=4.1
-VARIANTVALIDATOR_VERSION=...              # derived from pinned SHAs
-MUTALYZER_VERSION=...                     # set per pip-installed version
+# variantvalidator + mutalyzer versions are auto-detected at runtime:
+# VV via its /hello banner endpoint, mutalyzer via importlib.metadata.
+# Both are cached after first resolution.
 ```
 
 ## Reference data layout
