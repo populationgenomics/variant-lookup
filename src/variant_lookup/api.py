@@ -17,6 +17,9 @@ from variant_lookup.models import (
     VariantBatchRequest,
     VariantBatchResponse,
 )
+from variant_lookup.pipeline import Pipeline
+from variant_lookup.refseq import get_index as get_refseq_index
+from variant_lookup.variantvalidator_client import VariantValidatorClient
 
 
 def create_app() -> FastAPI:
@@ -48,11 +51,16 @@ def create_app() -> FastAPI:
         response_model=VariantBatchResponse,
         dependencies=[Depends(require_api_key)],
     )
-    def _lookup_variants(_request: VariantBatchRequest) -> VariantBatchResponse:
-        raise HTTPException(
-            status_code=status.HTTP_501_NOT_IMPLEMENTED,
-            detail="variant lookup pipeline not yet implemented",
+    def _lookup_variants(
+        request: VariantBatchRequest,
+        settings: Annotated[Settings, Depends(get_settings)],
+    ) -> VariantBatchResponse:
+        pipeline = Pipeline(
+            settings=settings,
+            refseq_index=get_refseq_index(),
+            vv_client=VariantValidatorClient(settings.vv_base_url),
         )
+        return pipeline.process_batch(request.variants, request.genome_build)
 
     @app.get(
         "/mutalyzer/normalize/{description:path}",

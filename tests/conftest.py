@@ -2,11 +2,13 @@
 
 Sets up a minimal environment before any module imports `Settings`:
     - a temp api-keys.yaml with one known argon2id-hashed key
-    - placeholder paths for echtvar/refseq (missing on purpose, exercises the
+    - a tiny refseq_processed.json (so /v1/variants can load it)
+    - placeholder paths for echtvar (missing on purpose, exercises the
       degraded `/readyz` path)
     - an unreachable VV URL (exercises the unreachable probe path)
 """
 
+import json
 import os
 import tempfile
 from pathlib import Path
@@ -35,8 +37,11 @@ _keys_file.write_text(
     )
 )
 
+_refseq_file = _TMPDIR / "refseq_processed.json"
+_refseq_file.write_text(json.dumps({}))
+
 os.environ.setdefault("API_KEYS_FILE", str(_keys_file))
 os.environ.setdefault("VV_BASE_URL", "http://variantvalidator.invalid:8000")
 os.environ.setdefault("ECHTVAR_ARCHIVE", str(_TMPDIR / "echtvar.zip"))
-os.environ.setdefault("REFSEQ_CACHE_PATH", str(_TMPDIR / "refseq_processed.json"))
+os.environ.setdefault("REFSEQ_CACHE_PATH", str(_refseq_file))
 os.environ.setdefault("NCBI_EUTILS_EMAIL", "test@example.com")

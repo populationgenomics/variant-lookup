@@ -42,7 +42,11 @@ def test_correct_name_wrong_secret_rejected() -> None:
     assert _request(_client(), headers=headers) == 401
 
 
-def test_valid_credentials_reach_501_stub() -> None:
-    # Auth passed; pipeline is still a 501 stub.
+def test_valid_credentials_with_empty_batch_succeeds() -> None:
     headers = {"Authorization": f"Bearer {TEST_BEARER}"}
-    assert _request(_client(), headers=headers) == 501
+    response = _client().post(
+        "/v1/variants",
+        json={"genome_build": "GRCh38", "variants": []},
+        headers=headers,
+    )
+    assert response.status_code == 200

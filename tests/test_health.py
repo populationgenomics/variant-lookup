@@ -13,12 +13,12 @@ def test_healthz_ok() -> None:
 
 
 def test_readyz_degraded_when_upstreams_missing() -> None:
-    # conftest leaves echtvar / refseq files non-existent and VV URL unreachable.
+    # conftest creates refseq (so /v1/variants can boot) but leaves echtvar
+    # missing and the VV URL unreachable.
     client = TestClient(create_app())
     response = client.get("/readyz")
     assert response.status_code == 503
     body = response.json()
     assert body["status"] == "degraded"
     assert body["upstreams"]["echtvar_archive"]["status"] == "missing"
-    assert body["upstreams"]["refseq_cache"]["status"] == "missing"
     assert body["upstreams"]["variantvalidator"]["status"] == "unreachable"

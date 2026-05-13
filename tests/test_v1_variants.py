@@ -1,0 +1,74 @@
+"""End-to-end tests for POST /v1/variants with mocked upstreams."""
+
+from unittest.mock import patch
+
+from fastapi.testclient import TestClient
+
+from tests.conftest import TEST_BEARER
+from variant_lookup.api import create_app
+from variant_lookup.models import Frequency
+from variant_lookup.variantvalidator_client import VVResult
+
+
+def test_empty_batch_returns_meta_only() -> None:
+    client = TestClient(create_app())
+    response = client.post(
+        "/v1/variants",
+        json={"genome_build": "GRCh38", "variants": []},
+        headers={"Authorization": f"Bearer {TEST_BEARER}"},
+    )
+    assert response.status_code == 200
+    body = response.json()
+    assert body["meta"]["reference"] == "GRCh38"
+    assert body["results"] == []
+
+
+def test_e2e_coding_variant_returns_normalized_with_frequency() -> None:
+    fake_freq = Frequency(
+        ac=5,
+        an=1614174,
+        homozygote_count=0,
+        hemizygote_count=0,
+        faf95_popmax=None,
+        faf95_popmax_population=None,
+    )
+    fake_vv = VVResult(
+        pseudo_vcf="8-42437272-C-A",
+        hgvs_c="NM_006749.5:c.1240G>T",
+        hgvs_p="NP_006740.1:p.Glu414Ter",
+    )
+
+    with (
+        patch("variant_lookup.api.VariantValidatorClient") as VVC,
+        patch("variant_lookup.pipeline.echtvar.annotate", return_value=[fake_freq]),
+        patch(
+            "variant_lookup.pipeline.mutalyzer_client.normalize",
+            return_value={"normalized_description": "NM_006749.5:c.1240G>T"},
+        ),
+    ):
+        VVC.return_value.mane_select.return_value = fake_vv
+        client = TestClient(create_app())
+        response = client.post(
+            "/v1/variants",
+            json={
+                "genome_build": "GRCh38",
+                "variants": [
+                    {
+                        "id": "v1",
+                        "gene": "SLC20A2",
+                        "hgnc_id": 11013,
+                        "variant": "NM_006749.5:c.1240G>T",
+                    }
+                ],
+            },
+            headers={"Authorization": f"Bearer {TEST_BEARER}"},
+        )
+
+    assert response.status_code == 200
+    body = response.json()
+    assert len(body["results"]) == 1
+    result = body["results"][0]
+    assert result["id"] == "v1"
+    assert result["error"] is None
+    assert result["normalized"][0]["pseudo_vcf"] == "8-42437272-C-A"
+    assert result["normalized"][0]["frequency"]["ac"] == 5
