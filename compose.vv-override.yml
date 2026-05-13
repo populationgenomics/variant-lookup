@@ -38,18 +38,15 @@ services:
       - vdb-data:/var/lib/mysql
     ports: !override []
     # Upstream's Dockerfile sets max_connections=250 in /etc/mysql/my.cnf.
-    # VV's compute_pool_sizes() in rest_VariantValidator/utils/object_pool.py
-    # scales its Validator/Formatter/g2t object pool to ~85% of MySQL's cap,
-    # and each Validator's __init__ opens multiple MySQL connections during
-    # construction (schema probe + data connection + vvhgvs/UTA setup), so
-    # the boot peak runs at `pool * K` for some K > 1 — empirically we see
-    # the connection count climb past 250 on a clean boot, never plateauing
-    # at the pool object count. Lowering max_connections doesn't help: the
-    # pool scales down by the same factor, hitting the new cap at the same
-    # percentage. Only fix without modifying VV is to give MySQL enough
-    # headroom to absorb the transient peak. 1000 covers K up to ~5 against
-    # the RAM-limited pool ceiling of ~220 objects on this host.
-    command: ["mysqld", "--max-connections=1000"]
+    # VV's object_pool.py eagerly constructs ~217 Validator/Formatter objects
+    # at module load. Each Validator's __init__ opens ~5 MySQL connections
+    # during construction (empirically observed: pool ~217 → MySQL
+    # Threads_connected peaks around 5×217=1085). Pool size scales linearly
+    # with max_connections (~85% of it), so lowering it doesn't help — boot
+    # peak hits the new cap at the same percentage. Only fix without
+    # modifying VV is to give MySQL enough headroom for K × pool. 2000
+    # covers K up to ~9 against the RAM-limited pool ceiling of ~220.
+    command: ["mysqld", "--max-connections=2000"]
 
   rv-vvta:
     build:
@@ -58,6 +55,12 @@ services:
     volumes:
       - vvta-data:/var/lib/postgresql/data
     ports: !override []
+    # Postgres default max_connections is 100. VV's object_pool.py eagerly
+    # constructs 217 Validator/Formatter objects at module load (gunicorn
+    # worker boot), and each opens one UTA connection here in addition to
+    # the MySQL ones. 100 is the wall after fixing MySQL. -c on the command
+    # line beats whatever's in the on-disk postgresql.conf.
+    command: ["postgres", "-c", "max_connections=500"]
 
   rv-seqrepo:
     build:
