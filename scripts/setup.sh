@@ -81,6 +81,13 @@ build_vv() {
 
 refresh_echtvar() {
     require_gateway_image
+    local archive_final="${DATA_DIR}/echtvar/gnomad.joint.v4.1.echtvar.zip"
+    if [ -s "${archive_final}" ]; then
+        log "Found existing ${archive_final}; nothing to do"
+        log "    delete it (or rename it) to force a rebuild"
+        return 0
+    fi
+
     local stage="${DATA_DIR}/echtvar/staging"
     local build="${DATA_DIR}/echtvar/build"
     mkdir -p "${stage}" "${build}"
@@ -124,21 +131,60 @@ AWS_CONFIG
 ]
 JSON
 
-    log "Encoding echtvar archive via ${IMAGE_TAG} (~1-2 h)"
-    local vcf_args=()
+    # echtvar encode is single-threaded per VCF (vcf.set_threads(2) only adds
+    # two bgzf-decompression helpers), so a one-shot invocation with all 24
+    # VCFs leaves N-1 host cores idle. Output zips' paths are
+    # `echtvar/<chrom>/<block>/...` (disjoint across chromosomes), so we
+    # encode each chromosome in its own container in parallel and merge.
+    log "Encoding 24 per-chromosome echtvar archives in parallel via ${IMAGE_TAG}"
+    log "    per-chr logs at ${build}/echtvar-encode-chr*.log"
+    local pids=() chr_archive
     for chr in {1..22} X Y; do
-        vcf_args+=("/stage/gnomad.joint.v4.1.sites.chr${chr}.vcf.bgz")
+        chr_archive="${build}/gnomad.joint.v4.1.chr${chr}.echtvar.zip"
+        if [ -s "${chr_archive}" ]; then
+            log "    chr${chr}: ${chr_archive} present, skipping encode (delete to force re-encode)"
+            continue
+        fi
+        docker run --rm \
+            --user "$(id -u):$(id -g)" \
+            -v "${stage}:/stage:ro" \
+            -v "${build}:/build" \
+            --workdir /build \
+            --name "echtvar-encode-chr${chr}" \
+            "${IMAGE_TAG}" \
+            echtvar encode \
+                "gnomad.joint.v4.1.chr${chr}.echtvar.zip" \
+                gnomad.v4.1.joint.json \
+                "/stage/gnomad.joint.v4.1.sites.chr${chr}.vcf.bgz" \
+            > "${build}/echtvar-encode-chr${chr}.log" 2>&1 \
+            &
+        pids+=("$!")
+    done
+    local rc=0
+    for pid in "${pids[@]}"; do
+        wait "${pid}" || rc=$?
+    done
+    if [ "${rc}" -ne 0 ]; then
+        echo "ERROR: at least one echtvar encode failed; see ${build}/echtvar-encode-chr*.log" >&2
+        exit "${rc}"
+    fi
+
+    log "Merging per-chromosome archives into gnomad.joint.v4.1.echtvar.zip"
+    local merge_args=("gnomad.joint.v4.1.echtvar.zip")
+    for chr in {1..22} X Y; do
+        merge_args+=("gnomad.joint.v4.1.chr${chr}.echtvar.zip")
     done
     docker run --rm \
         --user "$(id -u):$(id -g)" \
-        -v "${stage}:/stage:ro" \
         -v "${build}:/build" \
+        -v "${REPO_ROOT}/scripts:/scripts:ro" \
         --workdir /build \
         "${IMAGE_TAG}" \
-        echtvar encode \
-            gnomad.joint.v4.1.echtvar.zip \
-            gnomad.v4.1.joint.json \
-            "${vcf_args[@]}"
+        python /scripts/zipmerge.py "${merge_args[@]}"
+
+    for chr in {1..22} X Y; do
+        rm -f "${build}/gnomad.joint.v4.1.chr${chr}.echtvar.zip"
+    done
 
     mv -f "${build}/gnomad.joint.v4.1.echtvar.zip" "${DATA_DIR}/echtvar/"
     log "Wrote ${DATA_DIR}/echtvar/gnomad.joint.v4.1.echtvar.zip"
