@@ -127,9 +127,15 @@ JSON
 }
 
 refresh_refseq() {
-    log "Refreshing RefSeq MANE-Select / Select index"
-    echo "    TODO: port palit's _RefSeqClient._process_raw_resource to a standalone script."
-    echo "    Target output: ${DATA_DIR}/refseq/refseq_processed.json"
+    require_gateway_image
+    log "Building RefSeq MANE-Select / Select index via ${IMAGE_TAG}"
+    mkdir -p "${DATA_DIR}/refseq"
+    docker run --rm \
+        --user "$(id -u):$(id -g)" \
+        -v "${DATA_DIR}/refseq:/data/refseq" \
+        "${IMAGE_TAG}" \
+        python -m variant_lookup.refseq_build /data/refseq/refseq_processed.json
+    log "Wrote ${DATA_DIR}/refseq/refseq_processed.json"
 }
 
 build_gateway() {
