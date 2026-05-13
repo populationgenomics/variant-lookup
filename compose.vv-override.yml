@@ -55,6 +55,12 @@ services:
     build:
       context: ./vendor/rest_variantValidator
     ports: !override []
+    # Upstream's docker-compose.yml overrides the image's CMD with
+    # `/bin/bash -c "sleep infinity"` so a developer can docker-exec in and
+    # start the REST service manually. We want it running automatically, so
+    # restore the image's Dockerfile CMD (gunicorn).
+    entrypoint: []
+    command: ["gunicorn", "-b", "0.0.0.0:8000", "--timeout", "600", "app", "--threads=5", "--chdir", "./rest_VariantValidator/"]
     # Expose the upstream service under a friendlier alias so the gateway's
     # `VV_BASE_URL: http://variantvalidator:8000` resolves without us having
     # to bake upstream's service name into our config.
