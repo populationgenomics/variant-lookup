@@ -195,11 +195,15 @@ ${DATA_DIR}/
                                         # (also indexed by versionless accession for autocomplete)
   mutalyzer/
     cache/                              # mutalyzer/retriever's reference sequence cache (writable)
-  variantvalidator/                     # belongs to the AGPL VV service
-    seqdata/                            # SeqRepo (writable)
-    vdb-mysql/                          # VV MySQL data
-    vvta-postgres/                      # UTA PostgreSQL data
-    logs/
+  variantvalidator/                     # belongs to the AGPL VV service.
+                                        # Upstream's defaults point at $HOME and
+                                        # leave the DBs in the container layer;
+                                        # compose.vv-override.yml redirects them
+                                        # to here and adds persistence.
+    seqdata/                            # SeqRepo, bind-mounted into rv-seqrepo + rest
+    logs/                               # rest service log files
+    vdb-mysql/                          # MySQL data (validator DB, ~30 min to re-init)
+    vvta-postgres/                      # PostgreSQL data (UTA, ~30 min to re-init)
 ```
 
 In-container paths are `/data/<dataset>/...` — code references only those, never the host path.

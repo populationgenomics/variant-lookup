@@ -10,10 +10,15 @@
 #   docker compose \
 #     -f docker-compose.yml \
 #     -f vendor/rest_variantValidator/docker-compose.yml \
+#     -f compose.vv-override.yml \
 #     up -d
 #
+# compose.vv-override.yml redirects VV's bind-mounts away from $HOME and
+# adds persistent volumes for the MySQL + PostgreSQL data dirs. It's pure
+# configuration layered over upstream — no patching.
+#
 # The separation keeps the AGPL boundary explicit: VariantValidator's
-# upstream sources are checked out under vendor/ at a pinned SHA, built into
+# upstream sources are checked out under vendor/ at master HEAD, built into
 # their own images, and communicated with over HTTP only. They are not
 # bundled into the gateway image. See ARCHITECTURE.md § "AGPL boundary".
 

@@ -1,0 +1,51 @@
+# Overlays on top of vendor/rest_variantValidator/docker-compose.yml.
+# Layered, not patched — upstream sources are not modified, this is
+# pure configuration that compose merges at run time.
+#
+# Two purposes:
+#   1. Redirect the upstream `seqdata` + `vv-logs` named volumes away from
+#      ${HOME}/variantvalidator_data/ to ${DATA_DIR}/variantvalidator/...
+#   2. Add bind-mounted volumes for the MySQL and PostgreSQL data dirs
+#      (upstream has none, so the DBs live in the container writable
+#      layer — every `docker compose down` would cost ~30 min of PG
+#      initialization on the next `up`).
+#
+# Use:
+#   docker compose -f docker-compose.yml \
+#                  -f vendor/rest_variantValidator/docker-compose.yml \
+#                  -f compose.vv-override.yml \
+#                  up -d
+
+services:
+  rv-vdb:
+    volumes:
+      - vdb-data:/var/lib/mysql
+
+  rv-vvta:
+    volumes:
+      - vvta-data:/var/lib/postgresql/data
+
+volumes:
+  # Override upstream's named volumes: same name, deep-merged driver_opts.device.
+  seqdata:
+    driver_opts:
+      device: ${DATA_DIR}/variantvalidator/seqdata
+
+  vv-logs:
+    driver_opts:
+      device: ${DATA_DIR}/variantvalidator/logs
+
+  # New bind-mounted volumes for the two databases.
+  vdb-data:
+    driver: local
+    driver_opts:
+      type: 'none'
+      o: 'bind'
+      device: ${DATA_DIR}/variantvalidator/vdb-mysql
+
+  vvta-data:
+    driver: local
+    driver_opts:
+      type: 'none'
+      o: 'bind'
+      device: ${DATA_DIR}/variantvalidator/vvta-postgres

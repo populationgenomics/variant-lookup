@@ -3,7 +3,8 @@
 #
 # Subcommands:
 #   ./scripts/setup.sh                  # full bootstrap (everything in order)
-#   ./scripts/setup.sh vendor-vv        # clone the VariantValidator repos and check out pinned SHAs
+#   ./scripts/setup.sh vendor-vv        # clone rest_variantValidator at origin/master
+#   ./scripts/setup.sh ensure-vv-dirs   # create the bind-mount targets under ${DATA_DIR}/variantvalidator/
 #   ./scripts/setup.sh build-vv         # build VariantValidator's docker images (slow, ~1 h)
 #   ./scripts/setup.sh refresh-echtvar  # download gnomAD VCFs and encode the echtvar archive
 #   ./scripts/setup.sh refresh-refseq   # rebuild the RefSeq MANE-Select index
@@ -27,6 +28,17 @@ VENDOR_DIR="${REPO_ROOT}/vendor"
 IMAGE_TAG="variant-lookup-gateway:latest"
 
 log() { printf '==> %s\n' "$*"; }
+
+ensure_vv_data_dirs() {
+    # Bind-mount targets referenced by compose.vv-override.yml. Must exist
+    # before `docker compose up` so the bind mounts resolve.
+    log "Ensuring VariantValidator data directories under ${DATA_DIR}/variantvalidator/"
+    mkdir -p \
+        "${DATA_DIR}/variantvalidator/seqdata" \
+        "${DATA_DIR}/variantvalidator/logs" \
+        "${DATA_DIR}/variantvalidator/vdb-mysql" \
+        "${DATA_DIR}/variantvalidator/vvta-postgres"
+}
 
 require_gateway_image() {
     if ! docker image inspect "${IMAGE_TAG}" >/dev/null 2>&1; then
@@ -127,6 +139,7 @@ build_gateway() {
 
 bootstrap() {
     vendor_vv
+    ensure_vv_data_dirs
     build_vv
     build_gateway      # must precede refresh_echtvar (encode runs inside this image)
     refresh_echtvar
@@ -138,18 +151,20 @@ Bootstrap complete. Bring the stack up with:
   docker compose \\
     -f docker-compose.yml \\
     -f vendor/rest_variantValidator/docker-compose.yml \\
+    -f compose.vv-override.yml \\
     up -d
 
 EOF
 }
 
 case "${1:-bootstrap}" in
-    bootstrap)       bootstrap ;;
-    vendor-vv)       vendor_vv ;;
-    build-vv)        build_vv ;;
-    refresh-echtvar) refresh_echtvar ;;
-    refresh-refseq)  refresh_refseq ;;
-    build-gateway)   build_gateway ;;
+    bootstrap)        bootstrap ;;
+    vendor-vv)        vendor_vv ;;
+    ensure-vv-dirs)   ensure_vv_data_dirs ;;
+    build-vv)         build_vv ;;
+    refresh-echtvar)  refresh_echtvar ;;
+    refresh-refseq)   refresh_refseq ;;
+    build-gateway)    build_gateway ;;
     -h|--help|help)
         sed -n '2,15p' "$0"
         ;;
