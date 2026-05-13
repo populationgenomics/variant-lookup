@@ -25,17 +25,35 @@
 #                  up -d
 
 services:
+  # Upstream's `build:` directives use `context: .` and `dockerfile:
+  # db_dockerfiles/...`. Compose v2 resolves those relative to the project
+  # directory (the first `-f` file's dir = our repo root), not relative to
+  # each compose file's own location, so the upstream paths can't be found.
+  # We re-anchor every build context to the vendored tree explicitly.
   rv-vdb:
+    build:
+      context: ./vendor/rest_variantValidator
+      dockerfile: db_dockerfiles/vdb/Dockerfile
     volumes:
       - vdb-data:/var/lib/mysql
     ports: !override []
 
   rv-vvta:
+    build:
+      context: ./vendor/rest_variantValidator
+      dockerfile: db_dockerfiles/vvta/Dockerfile
     volumes:
       - vvta-data:/var/lib/postgresql/data
     ports: !override []
 
+  rv-seqrepo:
+    build:
+      context: ./vendor/rest_variantValidator
+      dockerfile: db_dockerfiles/seqrepo/Dockerfile
+
   rest-variantvalidator:
+    build:
+      context: ./vendor/rest_variantValidator
     ports: !override []
     # Expose the upstream service under a friendlier alias so the gateway's
     # `VV_BASE_URL: http://variantvalidator:8000` resolves without us having
