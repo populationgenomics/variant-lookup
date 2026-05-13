@@ -272,8 +272,14 @@ def clean(
     if not refseq:
         predicted = _predict_refseq(hgvs_desc, gene_symbol, refseq_index)
         if not predicted:
+            if not gene_symbol:
+                raise VariantCleanupError(
+                    f"variant '{variant_text}' needs either a RefSeq prefix "
+                    f"(NC_/NM_/NP_:...) or a gene symbol to resolve a transcript"
+                )
             raise VariantCleanupError(
-                f"no refseq provided or predictable for '{variant_text}' (gene='{gene_symbol}')"
+                f"no MANE-Select transcript known for gene '{gene_symbol}' "
+                f"(needed to resolve '{variant_text}')"
             )
         refseq = predicted
     else:

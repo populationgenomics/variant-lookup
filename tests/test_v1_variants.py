@@ -28,6 +28,7 @@ def test_e2e_coding_variant_returns_normalized_with_frequency() -> None:
         ac=5,
         an=1614174,
         homozygote_count=0,
+        heterozygote_count=5,
         hemizygote_count=0,
         faf95_popmax=None,
         faf95_popmax_population=None,
@@ -56,7 +57,6 @@ def test_e2e_coding_variant_returns_normalized_with_frequency() -> None:
                     {
                         "id": "v1",
                         "gene": "SLC20A2",
-                        "hgnc_id": 11013,
                         "variant": "NM_006749.5:c.1240G>T",
                     }
                 ],

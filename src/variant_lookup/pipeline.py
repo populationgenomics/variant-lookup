@@ -9,10 +9,17 @@ Wires the components landed in Phases 1-5 into the end-to-end chain that
 4. for each candidate, ask VV for the GRCh38 pseudo-VCF + MANE-select hgvs-c/p
 5. bulk-lookup frequencies once via echtvar
 6. assemble per-variant :class:`VariantResult` objects in request order
+
+Per-stage wall-clock is captured into :class:`ResponseMeta`'s ``durations_ms``
+so callers can see where time went without external profiling.
 """
 
 import datetime
-from dataclasses import dataclass
+import time
+from collections import defaultdict
+from collections.abc import Iterator
+from contextlib import contextmanager
+from dataclasses import dataclass, field
 
 from variant_lookup import __version__, echtvar, mutalyzer_client, ncbi, normalize, versions
 from variant_lookup.config import Settings
@@ -31,19 +38,49 @@ from variant_lookup.variantvalidator_client import (
     VVResult,
 )
 
+# Stages reported in ResponseMeta.durations_ms. Listed explicitly (not derived
+# from the timing dict) so the response shape is stable even for batches
+# whose inputs don't exercise every stage.
+_STAGES: tuple[str, ...] = (
+    "cleanup",
+    "rsid",
+    "normalize",
+    "back_translate",
+    "variantvalidator",
+    "echtvar",
+    "total",
+)
+
 
 @dataclass
 class Pipeline:
     settings: Settings
     refseq_index: RefSeqIndex
     vv_client: VariantValidatorClient
+    # Per-request stage timings (ns). Populated as process_batch runs and read
+    # by _meta to fill ResponseMeta.durations_ms. Pipeline is constructed
+    # per-request in api._lookup_variants so this state is request-scoped.
+    _durations_ns: dict[str, int] = field(
+        default_factory=lambda: defaultdict(int), init=False, repr=False, compare=False
+    )
 
     def process_batch(
         self, variants: list[VariantInput], genome_build: str
     ) -> VariantBatchResponse:
-        results = [self._resolve_one(v, genome_build) for v in variants]
-        self._fill_frequencies(results)
+        with self._timed("total"):
+            results = [self._resolve_one(v, genome_build) for v in variants]
+            self._fill_frequencies(results)
         return VariantBatchResponse(meta=self._meta(), results=results)
+
+    # ----- timing ----------------------------------------------------------
+
+    @contextmanager
+    def _timed(self, key: str) -> Iterator[None]:
+        start = time.perf_counter_ns()
+        try:
+            yield
+        finally:
+            self._durations_ns[key] += time.perf_counter_ns() - start
 
     # ----- per-variant resolution to pseudo-VCFs ---------------------------
 
@@ -56,10 +93,11 @@ class Pipeline:
         vv_results: list[VVResult] = []
         last_error: VariantValidatorError | None = None
         for candidate in normalized_hgvs_strings:
-            try:
-                vv_results.append(self.vv_client.mane_select(_strip_parens(candidate)))
-            except VariantValidatorError as e:
-                last_error = e
+            with self._timed("variantvalidator"):
+                try:
+                    vv_results.append(self.vv_client.mane_select(_strip_parens(candidate)))
+                except VariantValidatorError as e:
+                    last_error = e
 
         if not vv_results:
             message = (
@@ -87,41 +125,44 @@ class Pipeline:
     def _cleanup_and_normalize(self, variant: VariantInput, genome_build: str) -> list[str]:
         """Apply rsID lookup / text cleanup / Mutalyzer normalization / back-translation."""
         cleaned = self._to_cleaned_variant(variant, genome_build)
-        try:
-            normalized = mutalyzer_client.normalize(str(cleaned))
-        except mutalyzer_client.MutalyzerError as e:
-            raise _PipelineError(
-                code=f"NORMALIZATION_{e.code}",
-                message=e.message,
-                upstream="mutalyzer",
-            ) from e
+        with self._timed("normalize"):
+            try:
+                normalized = mutalyzer_client.normalize(str(cleaned))
+            except mutalyzer_client.MutalyzerError as e:
+                raise _PipelineError(
+                    code=f"NORMALIZATION_{e.code}",
+                    message=e.message,
+                    upstream="mutalyzer",
+                ) from e
         normalized_str = normalized.get("normalized_description") or str(cleaned)
 
         if ":p." not in normalized_str:
             return [normalized_str]
 
-        try:
-            return mutalyzer_client.back_translate(normalized_str)
-        except mutalyzer_client.MutalyzerError as e:
-            raise _PipelineError(
-                code=f"BACK_TRANSLATE_{e.code}", message=e.message, upstream="mutalyzer"
-            ) from e
+        with self._timed("back_translate"):
+            try:
+                return mutalyzer_client.back_translate(normalized_str)
+            except mutalyzer_client.MutalyzerError as e:
+                raise _PipelineError(
+                    code=f"BACK_TRANSLATE_{e.code}", message=e.message, upstream="mutalyzer"
+                ) from e
 
     def _to_cleaned_variant(
         self, variant: VariantInput, genome_build: str
     ) -> normalize.CleanedVariant:
         rsid = normalize.extract_rsid(variant.variant)
         if rsid:
-            try:
-                resolution = ncbi.resolve_rsid(
-                    rsid,
-                    email=self.settings.ncbi_eutils_email,
-                    api_key=self.settings.ncbi_eutils_api_key,
-                )
-            except ncbi.NCBIError as e:
-                raise _PipelineError(
-                    code=f"RSID_{e.code}", message=e.message, upstream="ncbi"
-                ) from e
+            with self._timed("rsid"):
+                try:
+                    resolution = ncbi.resolve_rsid(
+                        rsid,
+                        email=self.settings.ncbi_eutils_email,
+                        api_key=self.settings.ncbi_eutils_api_key,
+                    )
+                except ncbi.NCBIError as e:
+                    raise _PipelineError(
+                        code=f"RSID_{e.code}", message=e.message, upstream="ncbi"
+                    ) from e
             hgvs_str = resolution.hgvs_c or resolution.hgvs_p or resolution.hgvs_g
             if not hgvs_str or ":" not in hgvs_str:
                 raise _PipelineError(
@@ -132,10 +173,13 @@ class Pipeline:
             refseq, hgvs_desc = hgvs_str.split(":", 1)
             return normalize.CleanedVariant(refseq=refseq, hgvs_desc=hgvs_desc)
 
-        try:
-            return normalize.clean(variant.variant, variant.gene, genome_build, self.refseq_index)
-        except normalize.VariantCleanupError as e:
-            raise _PipelineError(code="VARIANT_CLEANUP_FAILED", message=str(e)) from e
+        with self._timed("cleanup"):
+            try:
+                return normalize.clean(
+                    variant.variant, variant.gene, genome_build, self.refseq_index
+                )
+            except normalize.VariantCleanupError as e:
+                raise _PipelineError(code="VARIANT_CLEANUP_FAILED", message=str(e)) from e
 
     # ----- bulk frequency lookup -------------------------------------------
 
@@ -152,12 +196,13 @@ class Pipeline:
         if not pseudo_vcfs:
             return
 
-        frequencies = echtvar.annotate(
-            pseudo_vcfs,
-            archives_dir=self.settings.echtvar_archives_dir,
-            gnomad_version=self.settings.gnomad_version,
-            binary=self.settings.echtvar_bin,
-        )
+        with self._timed("echtvar"):
+            frequencies = echtvar.annotate(
+                pseudo_vcfs,
+                archives_dir=self.settings.echtvar_archives_dir,
+                gnomad_version=self.settings.gnomad_version,
+                binary=self.settings.echtvar_bin,
+            )
         for (ri, ni), freq in zip(positions, frequencies, strict=True):
             existing = results[ri].normalized
             assert existing is not None  # mypy: positions only added when not None
@@ -173,6 +218,9 @@ class Pipeline:
             variantvalidator=versions.variantvalidator_version(self.settings.vv_base_url),
             mutalyzer=versions.mutalyzer_version(),
             timestamp=datetime.datetime.now(tz=datetime.UTC).isoformat(),
+            durations_ms={
+                stage: round(self._durations_ns.get(stage, 0) / 1_000_000) for stage in _STAGES
+            },
         )
 
 

@@ -21,6 +21,7 @@ def test_returns_frequencies_in_request_order() -> None:
             ac=5,
             an=100,
             homozygote_count=0,
+            heterozygote_count=5,
             hemizygote_count=0,
             faf95_popmax=None,
             faf95_popmax_population=None,

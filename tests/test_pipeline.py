@@ -60,6 +60,7 @@ def _fake_freq() -> Frequency:
         ac=5,
         an=1614174,
         homozygote_count=0,
+        heterozygote_count=5,
         hemizygote_count=0,
         faf95_popmax=None,
         faf95_popmax_population=None,
@@ -88,7 +89,7 @@ def test_coding_variant_resolves_to_one_normalized(
     monkeypatch.setattr(echtvar, "annotate", lambda _, **__: [freq])
 
     response = pipe.process_batch(
-        [VariantInput(id="v1", gene="SLC20A2", hgnc_id=11013, variant="c.1240G>T")],
+        [VariantInput(id="v1", gene="SLC20A2", variant="c.1240G>T")],
         "GRCh38",
     )
 
@@ -131,7 +132,7 @@ def test_protein_variant_fans_out_to_multiple_candidates(
     monkeypatch.setattr(echtvar, "annotate", lambda _, **__: [None, None])
 
     response = pipe.process_batch(
-        [VariantInput(id="v1", gene="SLC20A2", hgnc_id=11013, variant="p.Glu414Ter")],
+        [VariantInput(id="v1", gene="SLC20A2", variant="p.Glu414Ter")],
         "GRCh38",
     )
 
@@ -170,7 +171,7 @@ def test_rsid_input_routes_to_ncbi(
     monkeypatch.setattr(echtvar, "annotate", lambda _, **__: [None])
 
     response = pipe.process_batch(
-        [VariantInput(id="v1", gene="SLC20A2", hgnc_id=11013, variant="rs12345")],
+        [VariantInput(id="v1", gene="SLC20A2", variant="rs12345")],
         "GRCh38",
     )
 
@@ -186,7 +187,7 @@ def test_rsid_input_routes_to_ncbi(
 def test_cleanup_failure_produces_error_result(pipe: pipeline.Pipeline) -> None:
     # Unparseable input — no letters means cleanup rejects it
     response = pipe.process_batch(
-        [VariantInput(id="v1", gene="SLC20A2", hgnc_id=11013, variant="12345")],
+        [VariantInput(id="v1", gene="SLC20A2", variant="12345")],
         "GRCh38",
     )
     result = response.results[0]
@@ -208,7 +209,7 @@ def test_vv_failure_produces_error_result(
     vv_client.mane_select.side_effect = VariantValidatorError("NO_GENOMIC_COORDS", "nope")
 
     response = pipe.process_batch(
-        [VariantInput(id="v1", gene="SLC20A2", hgnc_id=11013, variant="c.1240G>T")],
+        [VariantInput(id="v1", gene="SLC20A2", variant="c.1240G>T")],
         "GRCh38",
     )
     result = response.results[0]
@@ -227,7 +228,7 @@ def test_mutalyzer_normalize_failure_produces_error_result(
     monkeypatch.setattr(mutalyzer_client, "normalize", raise_)
 
     response = pipe.process_batch(
-        [VariantInput(id="v1", gene="SLC20A2", hgnc_id=11013, variant="c.1240G>T")],
+        [VariantInput(id="v1", gene="SLC20A2", variant="c.1240G>T")],
         "GRCh38",
     )
     result = response.results[0]
@@ -255,8 +256,8 @@ def test_partial_batch_mixes_success_and_error(
 
     response = pipe.process_batch(
         [
-            VariantInput(id="g1", gene="SLC20A2", hgnc_id=11013, variant="c.1240G>T"),
-            VariantInput(id="b1", gene="SLC20A2", hgnc_id=11013, variant="12345"),
+            VariantInput(id="g1", gene="SLC20A2", variant="c.1240G>T"),
+            VariantInput(id="b1", gene="SLC20A2", variant="12345"),
         ],
         "GRCh38",
     )
@@ -274,3 +275,93 @@ def test_meta_block_populated(
     assert response.meta.reference == "GRCh38"
     assert response.meta.gnomad
     assert response.meta.timestamp
+    # durations_ms always present; every stage reported (0 if not exercised).
+    assert set(response.meta.durations_ms.keys()) == {
+        "cleanup",
+        "rsid",
+        "normalize",
+        "back_translate",
+        "variantvalidator",
+        "echtvar",
+        "total",
+    }
+    # All non-negative ints.
+    assert all(isinstance(v, int) and v >= 0 for v in response.meta.durations_ms.values())
+
+
+def test_meta_durations_total_covers_per_stage(
+    pipe: pipeline.Pipeline,
+    vv_client: MagicMock,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """total should be >= sum of per-stage durations (modulo rounding)."""
+    monkeypatch.setattr(
+        mutalyzer_client,
+        "normalize",
+        lambda _: {"normalized_description": "NM_006749.5:c.1240G>T"},
+    )
+    vv_client.mane_select.return_value = VVResult(
+        pseudo_vcf="8-42437272-C-A",
+        hgvs_c="NM_006749.5:c.1240G>T",
+        hgvs_p="NP_006740.1:p.Glu414Ter",
+    )
+    monkeypatch.setattr(echtvar, "annotate", lambda _, **__: [_fake_freq()])
+
+    response = pipe.process_batch(
+        [VariantInput(id="v1", gene="SLC20A2", variant="c.1240G>T")],
+        "GRCh38",
+    )
+    d = response.meta.durations_ms
+    stage_sum = sum(
+        d[k]
+        for k in ("cleanup", "rsid", "normalize", "back_translate", "variantvalidator", "echtvar")
+    )
+    # Allow 1 ms slop for rounding (each stage is rounded independently).
+    assert d["total"] + 6 >= stage_sum
+
+
+# ----- gene-optional schema ----------------------------------------------
+
+
+def test_fully_qualified_input_works_without_gene(
+    pipe: pipeline.Pipeline,
+    vv_client: MagicMock,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A NC_…:g.… input has all info inline — `gene` is optional."""
+    monkeypatch.setattr(
+        mutalyzer_client,
+        "normalize",
+        lambda _: {"normalized_description": "NC_000016.10:g.2116896C>A"},
+    )
+    vv_client.mane_select.return_value = VVResult(
+        pseudo_vcf="16-2116896-C-A",
+        hgvs_c="NM_001009944.3:c.1543G>T",
+        hgvs_p="NP_001009944.3:p.Gly515Trp",
+    )
+    monkeypatch.setattr(echtvar, "annotate", lambda _, **__: [None])
+
+    response = pipe.process_batch(
+        [VariantInput(id="v1", variant="NC_000016.10:g.2116896C>A")],
+        "GRCh38",
+    )
+    result = response.results[0]
+    assert result.error is None
+    assert result.normalized is not None
+    assert result.normalized[0].pseudo_vcf == "16-2116896-C-A"
+
+
+def test_bare_variant_without_gene_fails_with_clear_message(
+    pipe: pipeline.Pipeline,
+) -> None:
+    """Bare c.… with no gene and no RefSeq prefix must produce a clear error."""
+    response = pipe.process_batch(
+        [VariantInput(id="v1", variant="c.1240G>T")],
+        "GRCh38",
+    )
+    result = response.results[0]
+    assert result.error is not None
+    assert result.error.code == "VARIANT_CLEANUP_FAILED"
+    # Message should mention what's missing, not include the literal "None".
+    assert "None" not in result.error.message
+    assert "gene symbol" in result.error.message or "RefSeq prefix" in result.error.message

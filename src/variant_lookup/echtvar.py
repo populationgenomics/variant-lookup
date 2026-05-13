@@ -95,17 +95,22 @@ def _info_to_frequency(info: dict[str, str], chrom: str, pos: int) -> Frequency 
     ac_str = info.get("gnomad_ac")
     if ac_str is None or int(ac_str) == _MISSING_INT:
         return None
+    ac = int(ac_str)
     ac_xy = int(info.get("gnomad_ac_xy", "0"))
+    hom = int(info.get("gnomad_nhomalt", "0"))
+    hemi = _hemizygote_count(chrom, pos, ac_xy)
+    het = max(ac - 2 * hom - hemi, 0)
     faf95_str = info.get("gnomad_faf95_max")
     faf95 = float(faf95_str) if faf95_str is not None and float(faf95_str) >= 0 else None
     gen_anc = info.get("gnomad_faf95_max_gen_anc")
     if gen_anc in (None, "", _MISSING_CATEGORICAL):
         gen_anc = None
     return Frequency(
-        ac=int(ac_str),
+        ac=ac,
         an=int(info["gnomad_an"]),
-        homozygote_count=int(info.get("gnomad_nhomalt", "0")),
-        hemizygote_count=_hemizygote_count(chrom, pos, ac_xy),
+        homozygote_count=hom,
+        heterozygote_count=het,
+        hemizygote_count=hemi,
         faf95_popmax=faf95,
         faf95_popmax_population=gen_anc,
     )

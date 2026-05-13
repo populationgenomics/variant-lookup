@@ -153,9 +153,52 @@ def test_annotate_returns_frequency_for_found_variant(monkeypatch, tmp_path) -> 
     assert freq.ac == 5
     assert freq.an == 1614174
     assert freq.homozygote_count == 0
+    assert freq.heterozygote_count == 5  # autosomal: 5 - 2*0 - 0
     assert freq.hemizygote_count == 0  # autosome
     assert freq.faf95_popmax == pytest.approx(0.0001)
     assert freq.faf95_popmax_population == "nfe"
+
+
+def test_annotate_autosomal_homozygote_derives_zero_het(monkeypatch, tmp_path) -> None:
+    """ac=2, hom=1 → het = 2 - 2*1 - 0 = 0."""
+    _make_archives(tmp_path, ("8",))
+    annotations = {
+        ("8", 42437272, "C", "A"): (
+            "gnomad_ac=2;gnomad_an=1614174;gnomad_nhomalt=1;gnomad_ac_xy=0"
+        ),
+    }
+    monkeypatch.setattr("variant_lookup.echtvar.subprocess.run", _fake_echtvar(annotations))
+
+    (freq,) = echtvar.annotate(
+        ["8-42437272-C-A"],
+        archives_dir=tmp_path,
+        gnomad_version="4.1",
+    )
+    assert freq is not None
+    assert freq.ac == 2
+    assert freq.homozygote_count == 1
+    assert freq.heterozygote_count == 0
+    assert freq.hemizygote_count == 0
+
+
+def test_annotate_chrx_nonpar_hemi_derives_zero_het(monkeypatch, tmp_path) -> None:
+    """ac=3 all on chrXY (hemi=3, hom=0) → het = 3 - 0 - 3 = 0."""
+    _make_archives(tmp_path, ("X",))
+    annotations = {
+        ("X", 50_000_000, "A", "G"): ("gnomad_ac=3;gnomad_an=100;gnomad_nhomalt=0;gnomad_ac_xy=3"),
+    }
+    monkeypatch.setattr("variant_lookup.echtvar.subprocess.run", _fake_echtvar(annotations))
+
+    (freq,) = echtvar.annotate(
+        ["X-50000000-A-G"],
+        archives_dir=tmp_path,
+        gnomad_version="4.1",
+    )
+    assert freq is not None
+    assert freq.ac == 3
+    assert freq.homozygote_count == 0
+    assert freq.hemizygote_count == 3
+    assert freq.heterozygote_count == 0
 
 
 def test_annotate_chrx_par_hemizygote_zero(monkeypatch, tmp_path) -> None:

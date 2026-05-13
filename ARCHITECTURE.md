@@ -6,7 +6,7 @@ This document is the source of truth for the system's shape, the boundaries betw
 
 ## Pipeline
 
-Input: a batch of variant records `{id, gene, hgnc_id, variant, genome_build?}`, where `variant` is whatever messy HGVS-like or `rs…` string an LLM extracted from a paper.
+Input: a batch of variant records `{id, variant, gene?, genome_build?}`, where `variant` is whatever messy HGVS-like or `rs…` string an LLM extracted from a paper. `gene` is optional and only needed when `variant` is unqualified (bare `c.…` / `p.…` without a RefSeq prefix) — it lets the cleanup phase predict a MANE-Select transcript.
 
 Per-variant chain:
 
@@ -58,11 +58,17 @@ Request:
 {
   "genome_build": "GRCh38",
   "variants": [
-    {"id": "v1", "gene": "SLC20A2", "hgnc_id": 11013, "variant": "c.1240G>T"},
-    {"id": "v2", "gene": "PDGFB",   "hgnc_id": 8804,  "variant": "p.Arg191*"}
+    {"id": "v1", "gene": "SLC20A2", "variant": "c.1240G>T"},
+    {"id": "v2", "gene": "PDGFB",   "variant": "p.Arg191*"},
+    {"id": "v3",                    "variant": "NC_000016.10:g.2116896C>A"}
   ]
 }
 ```
+
+`gene` is required when `variant` is unqualified (bare `c.…` / `p.…`, or
+`GENE:c.…`). It's optional when `variant` is fully qualified (`NC_…:g.…`,
+`NM_…:c.…`, `NP_…:p.…`) or an rsID — there's enough information in the
+string itself.
 
 Response (always 200 unless the request itself is malformed, auth fails, or the service is broken):
 
@@ -74,20 +80,25 @@ Response (always 200 unless the request itself is malformed, auth fails, or the 
     "gnomad": "4.1",
     "variantvalidator": "2.2.0",
     "mutalyzer": "3.0.4",
-    "timestamp": "2026-05-13T..."
+    "timestamp": "2026-05-13T...",
+    "durations_ms": {
+      "cleanup": 1, "rsid": 0, "normalize": 12, "back_translate": 0,
+      "variantvalidator": 1480, "echtvar": 80, "total": 1573
+    }
   },
   "results": [
     {
       "id": "v1",
-      "input": {"gene": "SLC20A2", "hgnc_id": 11013, "variant": "c.1240G>T"},
+      "input": {"id": "v1", "gene": "SLC20A2", "variant": "c.1240G>T"},
       "normalized": [
         {
           "pseudo_vcf": "8-42437272-C-A",
           "hgvs_c": "NM_001257180.2:c.1240G>T",
           "hgvs_p": "NP_001244109.1:p.Glu414Ter",
           "frequency": {
-            "ac": 0, "an": 1614174, "homozygote_count": 0,
-            "hemizygote_count": 0, "faf95_popmax": null, "faf95_popmax_population": null
+            "ac": 1, "an": 1614174,
+            "homozygote_count": 0, "heterozygote_count": 1, "hemizygote_count": 0,
+            "faf95_popmax": null, "faf95_popmax_population": null
           }
         }
       ],
@@ -95,7 +106,7 @@ Response (always 200 unless the request itself is malformed, auth fails, or the 
     },
     {
       "id": "v2",
-      "input": {"gene": "PDGFB", "hgnc_id": 8804, "variant": "p.Arg191*"},
+      "input": {"id": "v2", "gene": "PDGFB", "variant": "p.Arg191*"},
       "normalized": null,
       "error": {
         "code": "NORMALIZATION_FAILED",
@@ -111,8 +122,9 @@ Key contract points:
 
 - **`normalized` is a list**, even for non-ambiguous inputs. Protein variants can back-translate to multiple coding variants; the service returns them all and leaves selection (max-AC, all, etc.) to the caller.
 - **Per-variant `error` field** is the failure surface. The HTTP response stays 200 even if every variant in the batch fails; callers iterate.
-- **`meta` is always present** and contains the versions of every component used to produce the results, so callers can pin/cite/reproduce.
-- **`variant_not_found` in gnomAD** is not an error — it's a `frequency` object with `ac: 0` and nulls for FAF. Distinguishable from an actual gnomAD lookup error by inspecting `error`.
+- **`meta` is always present** and contains the versions of every component used to produce the results, so callers can pin/cite/reproduce. `meta.durations_ms` reports wall-clock time spent in each pipeline stage (`cleanup`, `rsid`, `normalize`, `back_translate`, `variantvalidator`, `echtvar`, `total`), summed across the batch. Stages that didn't fire for this batch report `0`.
+- **Frequency counts** satisfy `ac = 2*homozygote_count + heterozygote_count + hemizygote_count`. `hemizygote_count` is meaningful only on non-PAR chrX/Y; on autosomes and on the chrX/Y PAR regions it is `0` by construction. `heterozygote_count` is derived (`max(ac - 2*hom - hemi, 0)`) and emitted so callers don't have to compute it.
+- **`variant_not_found` in gnomAD** is not an error — `frequency` is `null` in that case. Distinguishable from an actual gnomAD lookup error by inspecting `error`.
 
 ### `GET /healthz`
 

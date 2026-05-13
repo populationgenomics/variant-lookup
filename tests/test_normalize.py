@@ -135,8 +135,15 @@ class TestCleanRejects:
             clean("chr8:g.42437272C>A", "SLC20A2", "GRCh99", refseq_index)
 
     def test_coding_without_gene_or_refseq_rejected(self, refseq_index: RefSeqIndex) -> None:
-        with pytest.raises(VariantCleanupError, match="refseq"):
+        with pytest.raises(VariantCleanupError, match=r"RefSeq prefix.*gene symbol"):
             clean("c.1240G>T", None, "GRCh38", refseq_index)
+
+    def test_coding_with_unknown_gene_rejected_clearly(self, refseq_index: RefSeqIndex) -> None:
+        """Gene provided but absent from the RefSeq index — clear, gene-specific message."""
+        with pytest.raises(
+            VariantCleanupError, match="no MANE-Select transcript known for gene 'UNKNOWN'"
+        ):
+            clean("c.1240G>T", "UNKNOWN", "GRCh38", refseq_index)
 
     def test_unparseable_input_rejected(self, refseq_index: RefSeqIndex) -> None:
         with pytest.raises(VariantCleanupError, match="unparsable"):
