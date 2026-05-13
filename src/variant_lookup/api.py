@@ -4,7 +4,7 @@ from typing import Annotated, Any
 
 from fastapi import Depends, FastAPI, HTTPException, Response, status
 
-from variant_lookup import __version__, echtvar
+from variant_lookup import __version__, echtvar, mutalyzer_client
 from variant_lookup.auth import require_api_key
 from variant_lookup.config import Settings, get_settings
 from variant_lookup.health import healthz, readyz
@@ -52,6 +52,26 @@ def create_app() -> FastAPI:
             status_code=status.HTTP_501_NOT_IMPLEMENTED,
             detail="variant lookup pipeline not yet implemented",
         )
+
+    @app.get(
+        "/mutalyzer/normalize/{description:path}",
+        dependencies=[Depends(require_api_key)],
+    )
+    def _mutalyzer_normalize_passthrough(description: str) -> dict[str, Any]:
+        return mutalyzer_client.normalize_raw(description)
+
+    @app.get(
+        "/mutalyzer/back_translate/{description:path}",
+        dependencies=[Depends(require_api_key)],
+    )
+    def _mutalyzer_back_translate_passthrough(description: str) -> list[str]:
+        try:
+            return mutalyzer_client.back_translate(description)
+        except mutalyzer_client.MutalyzerError as e:
+            raise HTTPException(
+                status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+                detail={"code": e.code, "message": e.message},
+            ) from e
 
     @app.post(
         "/echtvar/frequencies",

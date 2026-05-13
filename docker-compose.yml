@@ -35,6 +35,7 @@ services:
       VV_BASE_URL: http://variantvalidator:8000
       ECHTVAR_BIN: echtvar
       ECHTVAR_ARCHIVE: /data/echtvar/gnomad.joint.v4.1.echtvar.zip
+      MUTALYZER_CACHE_DIR: /data/mutalyzer/cache
       NCBI_EUTILS_EMAIL: ${NCBI_EUTILS_EMAIL}
       NCBI_EUTILS_API_KEY: ${NCBI_EUTILS_API_KEY:-}
       SERVICE_VERSION: ${SERVICE_VERSION:-0.1.0+dev}
