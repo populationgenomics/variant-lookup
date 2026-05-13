@@ -2,6 +2,21 @@
 
 FROM python:3.13-slim AS builder
 
+# `description-extractor` (transitive via `mutalyzer`) has no published wheel.
+# Its sdist's setup.py shells out to `git clone https://github.com/mutalyzer/
+# extractor-core.git` from a custom build_ext, then compiles a C++17 extension
+# against those sources. python:3.13-slim has neither git nor a C++ toolchain,
+# so we install them here. The builder stage is discarded — none of this ends
+# up in the runtime image.
+# Caveat: this also means each build pulls `master` HEAD of extractor-core;
+# the build is non-reproducible by upstream's design and needs network egress
+# to github.com.
+RUN set -eu \
+    && apt-get update \
+    && apt-get install -y --no-install-recommends \
+       git ca-certificates build-essential \
+    && rm -rf /var/lib/apt/lists/*
+
 RUN pip install --no-cache-dir uv
 
 WORKDIR /build
