@@ -15,7 +15,7 @@ Per-variant chain:
 3. **Normalize** the HGVS description by calling `mutalyzer.normalizer.normalize(...)` (in-process — the Mutalyzer Python library is MIT-licensed).
 4. **If input is `p.…`**: call `mutalyzer.back_translator.back_translate(...)` (in-process). Back-translation can return *multiple* coding variants for one protein change (different codons), each of which is carried forward and returned in the response — no policy choice is baked in at the service layer.
 5. **HGVS → genomic coordinates**: call VariantValidator (HTTP, sibling container) at `/VariantValidator/variantvalidator/GRCh38/{hgvs}/mane_select`. VV returns the GRCh38 pseudo-VCF (`chrom-pos-ref-alt`) plus the MANE-select HGVS-c / HGVS-p strings. For inputs that arrived as GRCh37 chromosomal coordinates, the cross-assembly projection happens implicitly inside VV (we always request `/GRCh38/`).
-6. **Pseudo-VCF → frequencies**: write a tiny sorted VCF, subprocess `echtvar anno` against the local `gnomad.joint.v4.1.echtvar.zip` archive, parse the annotated VCF back. echtvar's binary search inside 1 MB chunks gives ~1M lookups/sec offline.
+6. **Pseudo-VCF → frequencies**: group the pseudo-VCFs by chromosome, then for each chromosome present in the batch, write a tiny sorted VCF and subprocess `echtvar anno` against the matching per-chromosome archive (`gnomad.joint.v4.1.chr{chrom}.echtvar.zip`). The per-chromosome subprocess calls run concurrently via a `ThreadPoolExecutor`. echtvar's binary search inside 1 MB chunks gives ~1M lookups/sec offline. The encoded data is sharded by chromosome because categorical-INFO string tables in echtvar are keyed by insertion order per VCF — merging across chromosomes would silently misalign indices unless we decoded + remapped them.
 7. **Hemizygote derivation**: echtvar exposes `AC_joint_XY` but not a hemizygote count; we compute it in-process (0 for autosomes + PAR regions, `AC_XY` elsewhere on chrX/Y).
 8. **Response assembly**: combine normalized HGVS, pseudo-VCF, frequencies, and per-variant errors into the response object. Versions of every component are stamped in `meta`.
 
@@ -29,7 +29,7 @@ Two services in compose (plus an nginx sidecar for TLS):
 | `variantvalidator` (upstream image, unmodified) | HGVS → GRCh38 pseudo-VCF + MANE-select transcripts | sibling container, HTTP only | **AGPL-3.0-only** |
 | `nginx` (sidecar) | TLS termination, reverse proxy in front of `gateway` | sibling container | BSD-2-Clause |
 
-Mutalyzer is **in-process** because the library is MIT-licensed and importable. echtvar is **subprocess** because it's a CLI tool and the per-batch overhead (~10-30ms for fork + binary load) is irrelevant at our target throughput. VariantValidator is **HTTP-only across a container boundary** because it is AGPL — see §"AGPL boundary".
+Mutalyzer is **in-process** because the library is MIT-licensed and importable. echtvar is **subprocess** because it's a CLI tool; the wall-clock overhead is `max(per-subprocess startup)` across the chromosomes in the batch (each ~30-100 ms for fork + binary load + zip open of a ~150 MB per-chrom archive), since the dispatch is parallel. VariantValidator is **HTTP-only across a container boundary** because it is AGPL — see §"AGPL boundary".
 
 VariantValidator's deployment has internal dependencies (MySQL + PostgreSQL + SeqRepo containers) that come from the upstream `docker-compose.yml`. We **vendor `rest_variantValidator` under `vendor/`** and bring the upstream compose stack up alongside ours. The vendored sources are **not part of our service** — they belong to the AGPL surface and live outside `src/`.
 
@@ -126,12 +126,16 @@ Returns 200 with a per-upstream breakdown if everything is reachable; 503 if any
 {
   "status": "ready",
   "upstreams": {
-    "variantvalidator": "ok",
-    "echtvar_archive": {"status": "ok", "version": "gnomad-4.1"},
-    "refseq_cache": "ok"
+    "variantvalidator": {"status": "ok", "http": "200"},
+    "echtvar_archives": {"status": "ok", "path": "/data/echtvar"},
+    "refseq_cache": {"status": "ok", "path": "/data/refseq/refseq_processed.json"}
   }
 }
 ```
+
+If one or more of the 24 expected per-chromosome echtvar archives are missing,
+`echtvar_archives` reports `status: "incomplete"` with `missing_chroms` set to
+a comma-separated list (e.g. `"X,Y"`).
 
 ### `GET /docs`, `GET /openapi.json`
 
@@ -189,12 +193,13 @@ Single `${DATA_DIR}` host mount, subdirectories per dataset, mounted read-only i
 ```
 ${DATA_DIR}/
   echtvar/
-    gnomad.joint.v4.1.echtvar.zip       # ~3-4 GB, encoded from gnomAD v4.1 joint VCFs
+    gnomad.joint.v4.1.chr1.echtvar.zip  # 24 per-chromosome archives.
+    gnomad.joint.v4.1.chr2.echtvar.zip  # The gateway dispatches lookups
+    ...                                 # to the matching chromosome's archive.
+    gnomad.joint.v4.1.chrY.echtvar.zip
   refseq/
     refseq_processed.json               # MANE-Select / RefSeq-Select index by gene symbol
                                         # (also indexed by versionless accession for autocomplete)
-  mutalyzer/
-    cache/                              # mutalyzer/retriever's reference sequence cache (writable)
   variantvalidator/                     # belongs to the AGPL VV service.
                                         # Upstream's defaults point at $HOME and
                                         # leave the DBs in the container layer;
@@ -208,14 +213,15 @@ ${DATA_DIR}/
 
 In-container paths are `/data/<dataset>/...` — code references only those, never the host path.
 
-Reference data is **manually refreshed** in v1. A single `scripts/setup.sh` script handles both first-time bootstrap and per-dataset refresh via subcommands (`vendor-vv`, `build-vv`, `refresh-echtvar`, `refresh-refseq`, `build-gateway`). Each step is idempotent — re-running skips work that's already done.
+Reference data is **manually refreshed** in v1. A single `scripts/setup.sh` script handles both first-time bootstrap and per-dataset refresh via subcommands (`vendor-vv`, `ensure-vv-dirs`, `build-vv`, `build-gateway`, `refresh-echtvar`, `refresh-refseq`, `cleanup-echtvar-staging`). Each step is idempotent — re-running skips work that's already done.
 
 | Dataset | Source | Refresh trigger | Subcommand | Approx work |
 |---|---|---|---|---|
-| echtvar archive | gnomAD release notes | gnomAD point releases (rare) | `refresh-echtvar` | ~1-2 h sequential encode of 24 chromosome VCFs |
+| echtvar archives (24 per-chrom) | gnomAD release notes | gnomAD point releases (rare) | `refresh-echtvar` | ~3-5 h: ~800 GB S3 sync, then per-chromosome parallel encode of 24 VCFs |
 | refseq_processed.json | NCBI RefSeq GFF | New GRCh38 patch (every ~6 mo) | `refresh-refseq` | minutes |
-| Mutalyzer cache | NCBI on first use | Auto-warmed; manual flush if NCBI changes a record | n/a (auto) | n/a |
+| Mutalyzer cache | NCBI on first use | Auto-warmed; manual flush if NCBI changes a record | n/a (auto) | n/a (lives in a docker-managed named volume) |
 | VV seqdata / vvta / vdb | VV upstream master | Re-running `vendor-vv` fetches latest master | `vendor-vv` + `build-vv` | ~1 h compile + ~30 min db init |
+| Staging VCFs (post-encode) | n/a | After all 24 echtvar archives exist | `cleanup-echtvar-staging` | seconds; reclaims ~800 GB |
 
 ## Versioning
 
@@ -256,17 +262,17 @@ Neither is in scope for v1.
 
 ### `gateway` (this repo)
 
-- `app/api.py` — FastAPI routes, auth, request validation, response shaping, `meta` assembly.
-- `app/pipeline.py` — orchestrates the per-variant chain (parse → normalize → coords → freq).
-- `app/normalize.py` — variant-string cleanup regex + HGVS construction.
-- `app/mutalyzer_client.py` — in-process wrapper around `mutalyzer.normalizer.normalize` and `mutalyzer.back_translator.back_translate`. Translates Mutalyzer's error shapes into our `error` codes.
-- `app/variantvalidator_client.py` — HTTP client for the sibling VV container.
-- `app/echtvar.py` — sorted-VCF generation, `echtvar anno` subprocess, annotated-VCF parsing, hemizygote derivation.
-- `app/ncbi.py` — rsID resolution against NCBI E-utils. External HTTP. API key in env.
-- `app/refseq.py` — in-process `refseq_processed.json` lookup. Resolves gene symbol → MANE-Select transcript/protein/genomic accession, and versionless accession → versioned (replaces NCBI's accession-autocomplete).
-- `app/auth.py` — argon2id key verification.
-- `app/health.py` — `/healthz`, `/readyz`.
-- `app/config.py` — env-var loading and validation. **All paths and URLs come from env.**
+- `src/variant_lookup/api.py` — FastAPI routes, auth, request validation, response shaping, `meta` assembly.
+- `src/variant_lookup/pipeline.py` — orchestrates the per-variant chain (parse → normalize → coords → freq).
+- `src/variant_lookup/normalize.py` — variant-string cleanup regex + HGVS construction.
+- `src/variant_lookup/mutalyzer_client.py` — in-process wrapper around `mutalyzer.normalizer.normalize` and `mutalyzer.back_translator.back_translate`. Translates Mutalyzer's error shapes into our `error` codes.
+- `src/variant_lookup/variantvalidator_client.py` — HTTP client for the sibling VV container.
+- `src/variant_lookup/echtvar.py` — sorted-VCF generation, `echtvar anno` subprocess, annotated-VCF parsing, hemizygote derivation.
+- `src/variant_lookup/ncbi.py` — rsID resolution against NCBI E-utils. External HTTP. API key in env.
+- `src/variant_lookup/refseq.py` — in-process `refseq_processed.json` lookup. Resolves gene symbol → MANE-Select transcript/protein/genomic accession, and versionless accession → versioned (replaces NCBI's accession-autocomplete).
+- `src/variant_lookup/auth.py` — argon2id key verification.
+- `src/variant_lookup/health.py` — `/healthz`, `/readyz`.
+- `src/variant_lookup/config.py` — env-var loading and validation. **All paths and URLs come from env.**
 - `scripts/setup.sh` — one-shot bootstrap and per-dataset refresh; see "Reference data layout" for the subcommands.
 
 ### `variantvalidator` (vendored upstream sources)
@@ -306,7 +312,7 @@ These are deferred deliberately, not forgotten:
 
 ## Credits
 
-- **Microsoft `healthfutures-evagg`** ([github.com/microsoft/healthfutures-evagg](https://github.com/microsoft/healthfutures-evagg), MIT) — portions of the variant cleanup + normalization logic in `app/normalize.py` are derived from this project.
+- **Microsoft `healthfutures-evagg`** ([github.com/microsoft/healthfutures-evagg](https://github.com/microsoft/healthfutures-evagg), MIT) — portions of the variant cleanup + normalization logic in `src/variant_lookup/normalize.py` are derived from this project.
 - **Mutalyzer** (`mutalyzer/mutalyzer`, MIT, Leiden University Medical Center) — used in-process for HGVS normalization and protein-to-coding back-translation.
 - **VariantValidator** (`openvar/variantValidator` and `openvar/rest_variantValidator`, **AGPL-3.0-only**, Leicester) — used as a sibling container for HGVS-to-genomic-coordinates resolution. See §"AGPL boundary".
 - **echtvar** (`brentp/echtvar`, MIT, Brent Pedersen) — used as a subprocess for offline gnomAD frequency annotation.

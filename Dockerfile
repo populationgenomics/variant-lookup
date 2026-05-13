@@ -52,6 +52,15 @@ WORKDIR /app
 COPY --from=builder /build/.venv /app/.venv
 COPY --from=builder /build/src /app/src
 
+# Run as non-root. Builder-stage files in /app are world-readable + world-
+# executable from the default umask, so a non-privileged user can read the
+# venv + source and exec python. The only writable mount in the gateway is
+# /data/mutalyzer (a docker-managed named volume in our compose, so docker
+# initialises ownership to this UID on first mount).
+RUN groupadd --system --gid 1000 app \
+    && useradd --system --uid 1000 --gid 1000 --no-create-home --shell /usr/sbin/nologin app
+USER 1000:1000
+
 ENV PATH="/app/.venv/bin:$PATH" \
     PYTHONPATH="/app/src" \
     PYTHONUNBUFFERED=1

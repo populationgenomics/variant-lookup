@@ -45,7 +45,10 @@ services:
     volumes:
       - ${DATA_DIR}/echtvar:/data/echtvar:ro
       - ${DATA_DIR}/refseq:/data/refseq:ro
-      - ${DATA_DIR}/mutalyzer:/data/mutalyzer
+      # Mutalyzer's reference-sequence cache lives in a docker-managed named
+      # volume rather than a host bind mount, so docker handles permissions
+      # to match the container's non-root UID.
+      - mutalyzer-cache:/data/mutalyzer
       - ${API_KEYS_HOST_FILE}:/etc/variant-lookup/api-keys.yaml:ro
     restart: always
     healthcheck:
@@ -69,3 +72,7 @@ services:
       gateway:
         condition: service_started
     restart: always
+
+volumes:
+  mutalyzer-cache:
+    driver: local

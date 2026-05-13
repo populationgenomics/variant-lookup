@@ -2,13 +2,21 @@
 # Layered, not patched — upstream sources are not modified, this is
 # pure configuration that compose merges at run time.
 #
-# Two purposes:
+# Three purposes:
 #   1. Redirect the upstream `seqdata` + `vv-logs` named volumes away from
 #      ${HOME}/variantvalidator_data/ to ${DATA_DIR}/variantvalidator/...
 #   2. Add bind-mounted volumes for the MySQL and PostgreSQL data dirs
 #      (upstream has none, so the DBs live in the container writable
 #      layer — every `docker compose down` would cost ~30 min of PG
 #      initialization on the next `up`).
+#   3. Suppress upstream's host port publishes. Upstream's compose is
+#      written for standalone use and publishes ports for direct MySQL,
+#      Postgres, and REST access (33061, 54321, 5001/5050/8000/9000). Our
+#      gateway only ever talks to VV over the project's internal docker
+#      network, so we don't need any of them on the host — and dropping
+#      them avoids colliding with any other VV stack on the same host.
+#      Compose concatenates `ports:` across override layers by default;
+#      `!override []` replaces instead. Requires Compose v2.20+.
 #
 # Use:
 #   docker compose -f docker-compose.yml \
@@ -20,10 +28,22 @@ services:
   rv-vdb:
     volumes:
       - vdb-data:/var/lib/mysql
+    ports: !override []
 
   rv-vvta:
     volumes:
       - vvta-data:/var/lib/postgresql/data
+    ports: !override []
+
+  rest-variantvalidator:
+    ports: !override []
+    # Expose the upstream service under a friendlier alias so the gateway's
+    # `VV_BASE_URL: http://variantvalidator:8000` resolves without us having
+    # to bake upstream's service name into our config.
+    networks:
+      default:
+        aliases:
+          - variantvalidator
 
 volumes:
   # Override upstream's named volumes: same name, deep-merged driver_opts.device.
