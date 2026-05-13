@@ -23,6 +23,7 @@ ENV_FILE="${REPO_ROOT}/.env"
 set -a; . "${ENV_FILE}"; set +a
 
 : "${DATA_DIR:?DATA_DIR must be set in .env}"
+: "${AWS_CLI_VERSION:=2.34.30}"
 
 VENDOR_DIR="${REPO_ROOT}/vendor"
 IMAGE_TAG="variant-lookup-gateway:latest"
@@ -83,16 +84,21 @@ refresh_echtvar() {
     local build="${DATA_DIR}/echtvar/build"
     mkdir -p "${stage}" "${build}"
 
-    log "Downloading gnomAD v4.1 joint VCFs to ${stage}"
-    for chr in {1..22} X Y; do
-        local f="gnomad.joint.v4.1.sites.chr${chr}.vcf.bgz"
-        if [ -f "${stage}/${f}" ]; then
-            printf '    %s present, skipping\n' "${f}"
-        else
-            curl -fsSL --output "${stage}/${f}" \
-                "https://gnomad-public-us-east-1.s3.amazonaws.com/release/4.1/vcf/joint/${f}"
-        fi
-    done
+    log "Syncing gnomAD v4.1 joint VCFs from S3 to ${stage}"
+    # aws s3 sync handles parallel multipart downloads, retries, and resumes
+    # (skips files already present at the matching size). Public bucket, so
+    # --no-sign-request avoids needing AWS credentials. HOME=/tmp because we
+    # run as the host UID, which has no entry in the container's /etc/passwd
+    # and so no home directory the CLI can write its cache into.
+    docker run --rm \
+        --user "$(id -u):$(id -g)" \
+        -e HOME=/tmp \
+        -v "${stage}:/stage" \
+        "amazon/aws-cli:${AWS_CLI_VERSION}" \
+        s3 sync s3://gnomad-public-us-east-1/release/4.1/vcf/joint/ /stage/ \
+            --no-sign-request \
+            --exclude "*" \
+            --include "gnomad.joint.v4.1.sites.chr*.vcf.bgz"
 
     log "Writing echtvar field config"
     cat > "${build}/gnomad.v4.1.joint.json" <<'JSON'
