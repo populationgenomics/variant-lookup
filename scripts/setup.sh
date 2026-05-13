@@ -81,16 +81,23 @@ build_vv() {
 
 refresh_echtvar() {
     require_gateway_image
-    local archive_final="${DATA_DIR}/echtvar/gnomad.joint.v4.1.echtvar.zip"
-    if [ -s "${archive_final}" ]; then
-        log "Found existing ${archive_final}; nothing to do"
-        log "    delete it (or rename it) to force a rebuild"
+    local final_dir="${DATA_DIR}/echtvar"
+    local all_present=1
+    for chr in {1..22} X Y; do
+        if [ ! -s "${final_dir}/gnomad.joint.v4.1.chr${chr}.echtvar.zip" ]; then
+            all_present=0
+            break
+        fi
+    done
+    if [ "${all_present}" -eq 1 ]; then
+        log "Found all 24 per-chromosome archives under ${final_dir}; nothing to do"
+        log "    delete one (or all) to force a rebuild"
         return 0
     fi
 
     local stage="${DATA_DIR}/echtvar/staging"
     local build="${DATA_DIR}/echtvar/build"
-    mkdir -p "${stage}" "${build}"
+    mkdir -p "${stage}" "${build}" "${final_dir}"
 
     # Override the AWS CLI's default 10-concurrent / 8 MB chunk-size — too
     # conservative across the cross-Pacific link. There's no env-var path
@@ -133,14 +140,18 @@ JSON
 
     # echtvar encode is single-threaded per VCF (vcf.set_threads(2) only adds
     # two bgzf-decompression helpers), so a one-shot invocation with all 24
-    # VCFs leaves N-1 host cores idle. Output zips' paths are
-    # `echtvar/<chrom>/<block>/...` (disjoint across chromosomes), so we
-    # encode each chromosome in its own container in parallel and merge.
+    # VCFs leaves N-1 host cores idle. The output zip's paths are
+    # `echtvar/<chrom>/<block>/...` — disjoint across chromosomes — so we
+    # encode each chromosome in its own container in parallel, and the gateway
+    # dispatches lookups per-chrom against the matching archive. There is no
+    # merge step: categorical INFO field strings tables are built in insertion
+    # order per VCF, so per-chrom tables don't share indices, and a single
+    # merged archive would need a stream-vbyte-aware remap to be correct.
     log "Encoding 24 per-chromosome echtvar archives in parallel via ${IMAGE_TAG}"
     log "    per-chr logs at ${build}/echtvar-encode-chr*.log"
     local pids=() chr_archive
     for chr in {1..22} X Y; do
-        chr_archive="${build}/gnomad.joint.v4.1.chr${chr}.echtvar.zip"
+        chr_archive="${final_dir}/gnomad.joint.v4.1.chr${chr}.echtvar.zip"
         if [ -s "${chr_archive}" ]; then
             log "    chr${chr}: ${chr_archive} present, skipping encode (delete to force re-encode)"
             continue
@@ -169,25 +180,14 @@ JSON
         exit "${rc}"
     fi
 
-    log "Merging per-chromosome archives into gnomad.joint.v4.1.echtvar.zip"
-    local merge_args=("gnomad.joint.v4.1.echtvar.zip")
+    log "Moving per-chromosome archives into ${final_dir}/"
     for chr in {1..22} X Y; do
-        merge_args+=("gnomad.joint.v4.1.chr${chr}.echtvar.zip")
+        chr_archive="${build}/gnomad.joint.v4.1.chr${chr}.echtvar.zip"
+        if [ -s "${chr_archive}" ]; then
+            mv -f "${chr_archive}" "${final_dir}/"
+        fi
     done
-    docker run --rm \
-        --user "$(id -u):$(id -g)" \
-        -v "${build}:/build" \
-        -v "${REPO_ROOT}/scripts:/scripts:ro" \
-        --workdir /build \
-        "${IMAGE_TAG}" \
-        python /scripts/zipmerge.py "${merge_args[@]}"
-
-    for chr in {1..22} X Y; do
-        rm -f "${build}/gnomad.joint.v4.1.chr${chr}.echtvar.zip"
-    done
-
-    mv -f "${build}/gnomad.joint.v4.1.echtvar.zip" "${DATA_DIR}/echtvar/"
-    log "Wrote ${DATA_DIR}/echtvar/gnomad.joint.v4.1.echtvar.zip"
+    log "Wrote 24 per-chromosome archives to ${final_dir}/"
 }
 
 refresh_refseq() {
@@ -208,18 +208,25 @@ build_gateway() {
 }
 
 cleanup_echtvar_staging() {
-    # Once the encoded archive exists, the source VCFs (~700 GB) can go.
-    # Sanity-check that the archive is present and non-empty before deleting.
-    local archive="${DATA_DIR}/echtvar/gnomad.joint.v4.1.echtvar.zip"
+    # Once all 24 per-chromosome archives exist in ${DATA_DIR}/echtvar/, the
+    # source VCFs (~700 GB) and the build/ intermediate dir can go.
+    local final_dir="${DATA_DIR}/echtvar"
     local stage="${DATA_DIR}/echtvar/staging"
     local build="${DATA_DIR}/echtvar/build"
-    if [ ! -s "${archive}" ]; then
-        echo "ERROR: ${archive} missing or empty — refusing to delete staging." >&2
+    local missing=()
+    for chr in {1..22} X Y; do
+        if [ ! -s "${final_dir}/gnomad.joint.v4.1.chr${chr}.echtvar.zip" ]; then
+            missing+=("chr${chr}")
+        fi
+    done
+    if [ "${#missing[@]}" -gt 0 ]; then
+        echo "ERROR: per-chr archives missing or empty in ${final_dir}: ${missing[*]}" >&2
+        echo "       refusing to delete staging." >&2
         exit 1
     fi
     log "Removing staging VCFs at ${stage} and ${build}"
     rm -rf "${stage}" "${build}"
-    log "Done. Archive preserved at ${archive}"
+    log "Done. 24 per-chromosome archives preserved under ${final_dir}/"
 }
 
 bootstrap() {

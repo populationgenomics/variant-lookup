@@ -132,7 +132,8 @@ def create_app() -> FastAPI:
     ) -> EchtvarFrequenciesResponse:
         frequencies = echtvar.annotate(
             request.variants,
-            archive=settings.echtvar_archive,
+            archives_dir=settings.echtvar_archives_dir,
+            gnomad_version=settings.gnomad_version,
             binary=settings.echtvar_bin,
         )
         return EchtvarFrequenciesResponse(

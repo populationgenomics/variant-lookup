@@ -154,7 +154,8 @@ class Pipeline:
 
         frequencies = echtvar.annotate(
             pseudo_vcfs,
-            archive=self.settings.echtvar_archive,
+            archives_dir=self.settings.echtvar_archives_dir,
+            gnomad_version=self.settings.gnomad_version,
             binary=self.settings.echtvar_bin,
         )
         for (ri, ni), freq in zip(positions, frequencies, strict=True):

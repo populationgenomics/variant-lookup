@@ -1,14 +1,19 @@
 """echtvar subprocess wrapper for offline gnomAD frequency lookups.
 
-Subprocesses the echtvar binary against the local encoded archive.
-echtvar reads a sorted VCF and writes annotated INFO fields; we parse
-those back into per-variant :class:`Frequency` objects. PAR-aware
-hemizygote counts are derived in-process.
+The encoded data is sharded by chromosome — one archive per chrom, named
+``gnomad.joint.v{version}.chr{chrom}.echtvar.zip``. Per-chrom archives are
+the canonical form: the underlying string-id tables for categorical fields
+are per-archive (insertion-order indices differ across chromosomes), so a
+merged single-archive form is not safe without a stream-vbyte-aware index
+remap. ``annotate`` groups variants by chromosome, then dispatches one
+subprocess per chromosome in parallel, each against the matching archive.
 """
 
 import subprocess
 import tempfile
+from collections import defaultdict
 from collections.abc import Iterable, Sequence
+from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 from typing import NamedTuple
 
@@ -37,11 +42,8 @@ class PseudoVCF(NamedTuple):
         return cls(chrom.removeprefix("chr"), int(pos_s), ref, alt)
 
 
-def _chrom_sort_key(chrom: str) -> tuple[int, int, str]:
-    """Order 1..22, X, Y naturally — not lexicographically."""
-    if chrom.isdigit():
-        return (0, int(chrom), "")
-    return (1, 0, chrom)
+def _archive_path(archives_dir: Path, gnomad_version: str, chrom: str) -> Path:
+    return archives_dir / f"gnomad.joint.v{gnomad_version}.chr{chrom}.echtvar.zip"
 
 
 def _hemizygote_count(chrom: str, pos: int, ac_xy: int) -> int:
@@ -53,12 +55,13 @@ def _hemizygote_count(chrom: str, pos: int, ac_xy: int) -> int:
     return max(ac_xy, 0)
 
 
-def _write_vcf(path: Path, variants: Iterable[PseudoVCF]) -> None:
-    """Write a minimal valid VCF for echtvar input. Variants must already be sorted."""
-    contig_ids = [f"chr{c}" for c in (*[str(i) for i in range(1, 23)], "X", "Y")]
-    lines: list[str] = ["##fileformat=VCFv4.2"]
-    lines.extend(f"##contig=<ID={c}>" for c in contig_ids)
-    lines.append("#CHROM\tPOS\tID\tREF\tALT\tQUAL\tFILTER\tINFO")
+def _write_vcf(path: Path, chrom: str, variants: Iterable[PseudoVCF]) -> None:
+    """Write a minimal valid VCF for echtvar input. Variants must already be sorted by pos."""
+    lines: list[str] = [
+        "##fileformat=VCFv4.2",
+        f"##contig=<ID=chr{chrom}>",
+        "#CHROM\tPOS\tID\tREF\tALT\tQUAL\tFILTER\tINFO",
+    ]
     for v in variants:
         lines.append(f"chr{v.chrom}\t{v.pos}\t.\t{v.ref}\t{v.alt}\t.\t.\t.")
     path.write_text("\n".join(lines) + "\n")
@@ -99,33 +102,66 @@ def _info_to_frequency(info: dict[str, str], chrom: str, pos: int) -> Frequency 
     )
 
 
+def _annotate_one_chrom(
+    chrom: str,
+    variants: list[PseudoVCF],
+    *,
+    archive: Path,
+    binary: str,
+    tmp: Path,
+) -> dict[tuple[str, int, str, str], dict[str, str]]:
+    """Run echtvar against a single per-chromosome archive. Returns annotation map."""
+    if not archive.is_file():
+        return {}
+    sorted_variants = sorted(variants, key=lambda pv: pv.pos)
+    input_vcf = tmp / f"input_chr{chrom}.vcf"
+    output_vcf = tmp / f"output_chr{chrom}.vcf"
+    _write_vcf(input_vcf, chrom, sorted_variants)
+    subprocess.run(
+        [binary, "anno", "-e", str(archive), str(input_vcf), str(output_vcf)],
+        check=True,
+        capture_output=True,
+        text=True,
+    )
+    return _parse_vcf(output_vcf)
+
+
 def annotate(
     variants: Sequence[str],
     *,
-    archive: Path,
+    archives_dir: Path,
+    gnomad_version: str,
     binary: str = "echtvar",
 ) -> list[Frequency | None]:
-    """Annotate a list of pseudo-VCF strings against the local echtvar archive.
+    """Annotate a list of pseudo-VCF strings against per-chromosome echtvar archives.
 
     Returns a list parallel to ``variants`` — same length, same order. ``None``
     entries indicate variants not found in gnomAD (or with the missing-value
-    sentinel returned by echtvar).
+    sentinel returned by echtvar). Variants whose chromosome has no matching
+    archive are silently returned as ``None``.
     """
     parsed = [PseudoVCF.parse(s) for s in variants]
-    sorted_parsed = sorted(parsed, key=lambda pv: (_chrom_sort_key(pv.chrom), pv.pos))
+    by_chrom: dict[str, list[PseudoVCF]] = defaultdict(list)
+    for pv in parsed:
+        by_chrom[pv.chrom].append(pv)
 
+    annotations: dict[tuple[str, int, str, str], dict[str, str]] = {}
     with tempfile.TemporaryDirectory(prefix="echtvar-") as tmp_str:
         tmp = Path(tmp_str)
-        input_vcf = tmp / "input.vcf"
-        output_vcf = tmp / "output.vcf"
-        _write_vcf(input_vcf, sorted_parsed)
-        subprocess.run(
-            [binary, "anno", "-e", str(archive), str(input_vcf), str(output_vcf)],
-            check=True,
-            capture_output=True,
-            text=True,
-        )
-        annotations = _parse_vcf(output_vcf)
+        if by_chrom:
+            with ThreadPoolExecutor(max_workers=len(by_chrom)) as pool:
+                results = pool.map(
+                    lambda item: _annotate_one_chrom(
+                        item[0],
+                        item[1],
+                        archive=_archive_path(archives_dir, gnomad_version, item[0]),
+                        binary=binary,
+                        tmp=tmp,
+                    ),
+                    by_chrom.items(),
+                )
+                for chrom_annotations in results:
+                    annotations.update(chrom_annotations)
 
     return [
         _info_to_frequency(

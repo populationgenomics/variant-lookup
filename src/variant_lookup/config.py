@@ -20,9 +20,12 @@ class Settings(BaseSettings):
         description="Base URL of the sibling VariantValidator container (HTTP only).",
     )
     echtvar_bin: str = Field("echtvar", description="echtvar binary, expected on PATH.")
-    echtvar_archive: Path = Field(
+    echtvar_archives_dir: Path = Field(
         ...,
-        description="Path to the encoded gnomAD echtvar archive inside the container.",
+        description=(
+            "Directory containing the per-chromosome echtvar archives "
+            "(gnomad.joint.v{gnomad_version}.chr{chrom}.echtvar.zip)."
+        ),
     )
     refseq_cache_path: Path = Field(
         Path("/data/refseq/refseq_processed.json"),

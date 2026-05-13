@@ -42,6 +42,6 @@ _refseq_file.write_text(json.dumps({}))
 
 os.environ.setdefault("API_KEYS_FILE", str(_keys_file))
 os.environ.setdefault("VV_BASE_URL", "http://variantvalidator.invalid:8000")
-os.environ.setdefault("ECHTVAR_ARCHIVE", str(_TMPDIR / "echtvar.zip"))
+os.environ.setdefault("ECHTVAR_ARCHIVES_DIR", str(_TMPDIR / "echtvar"))
 os.environ.setdefault("REFSEQ_CACHE_PATH", str(_refseq_file))
 os.environ.setdefault("NCBI_EUTILS_EMAIL", "test@example.com")

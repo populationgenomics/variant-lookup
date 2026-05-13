@@ -1,12 +1,13 @@
 """Tests for the echtvar subprocess wrapper."""
 
 import subprocess
+from collections.abc import Iterable
 from pathlib import Path
 
 import pytest
 
 from variant_lookup import echtvar
-from variant_lookup.echtvar import PseudoVCF, _chrom_sort_key, _hemizygote_count
+from variant_lookup.echtvar import PseudoVCF, _hemizygote_count
 
 # --- pure helpers (no subprocess) -----------------------------------------
 
@@ -19,12 +20,6 @@ class TestPseudoVCFParse:
 
     def test_strips_chr_prefix(self) -> None:
         assert PseudoVCF.parse("chr8-42437272-C-A").chrom == "8"
-
-
-class TestChromSortKey:
-    def test_natural_order(self) -> None:
-        chroms = ["10", "2", "X", "1", "22", "Y", "11"]
-        assert sorted(chroms, key=_chrom_sort_key) == ["1", "2", "10", "11", "22", "X", "Y"]
 
 
 class TestHemizygoteCount:
@@ -48,6 +43,16 @@ class TestHemizygoteCount:
 
 
 # --- annotate with mocked subprocess --------------------------------------
+
+
+def _make_archives(archives_dir: Path, chroms: Iterable[str]) -> None:
+    """Place empty placeholder archive files where annotate() expects them.
+
+    annotate() only checks ``is_file()`` before invoking subprocess (the actual
+    zip parsing happens in echtvar itself, which we mock). Empty files pass.
+    """
+    for chrom in chroms:
+        (archives_dir / f"gnomad.joint.v4.1.chr{chrom}.echtvar.zip").write_bytes(b"")
 
 
 def _fake_echtvar(annotations: dict[tuple[str, int, str, str], str]):
@@ -79,39 +84,52 @@ def _fake_echtvar(annotations: dict[tuple[str, int, str, str], str]):
     return fake_run
 
 
-def test_annotate_sorts_input_naturally(monkeypatch, tmp_path) -> None:
-    captured: dict[str, str] = {}
+def test_annotate_dispatches_per_chrom_sorted_by_pos(monkeypatch, tmp_path) -> None:
+    """One subprocess call per chromosome, each receiving sorted-by-pos variants."""
+    _make_archives(tmp_path, ("1", "10", "X"))
+
+    calls: dict[str, list[int]] = {}
 
     def capturing_run(args, **kwargs):
-        captured["input"] = Path(args[-2]).read_text()
-        # Defer the rest to the no-hits fake
+        input_vcf = Path(args[-2])
+        text = input_vcf.read_text()
+        contig = next(line for line in text.splitlines() if line.startswith("##contig="))
+        chrom = contig.split("=<ID=chr", 1)[1].rstrip(">")
+        body_positions = [
+            int(line.split("\t")[1])
+            for line in text.splitlines()
+            if line and not line.startswith("#")
+        ]
+        calls[chrom] = body_positions
         return _fake_echtvar({})(args, **kwargs)
 
     monkeypatch.setattr("variant_lookup.echtvar.subprocess.run", capturing_run)
     echtvar.annotate(
-        ["10-100-A-G", "1-50-C-T", "X-200-G-A"],
-        archive=tmp_path / "dummy.zip",
+        ["10-200-A-G", "1-50-C-T", "10-100-T-G", "X-200-G-A"],
+        archives_dir=tmp_path,
+        gnomad_version="4.1",
     )
 
-    body_chroms = [
-        line.split("\t")[0]
-        for line in captured["input"].splitlines()
-        if line and not line.startswith("#")
-    ]
-    assert body_chroms == ["chr1", "chr10", "chrX"]
+    assert set(calls) == {"1", "10", "X"}
+    assert calls["1"] == [50]
+    assert calls["10"] == sorted(calls["10"]) == [100, 200]
+    assert calls["X"] == [200]
 
 
 def test_annotate_preserves_request_order(monkeypatch, tmp_path) -> None:
+    _make_archives(tmp_path, ("1", "10", "X"))
     monkeypatch.setattr("variant_lookup.echtvar.subprocess.run", _fake_echtvar({}))
     result = echtvar.annotate(
         ["10-100-A-G", "1-50-C-T", "X-200-G-A"],
-        archive=tmp_path / "dummy.zip",
+        archives_dir=tmp_path,
+        gnomad_version="4.1",
     )
     assert len(result) == 3
     assert all(freq is None for freq in result)
 
 
 def test_annotate_returns_frequency_for_found_variant(monkeypatch, tmp_path) -> None:
+    _make_archives(tmp_path, ("8",))
     annotations = {
         ("8", 42437272, "C", "A"): (
             "gnomad_ac=5;gnomad_an=1614174;gnomad_nhomalt=0;"
@@ -120,7 +138,11 @@ def test_annotate_returns_frequency_for_found_variant(monkeypatch, tmp_path) -> 
     }
     monkeypatch.setattr("variant_lookup.echtvar.subprocess.run", _fake_echtvar(annotations))
 
-    result = echtvar.annotate(["8-42437272-C-A"], archive=tmp_path / "dummy.zip")
+    result = echtvar.annotate(
+        ["8-42437272-C-A"],
+        archives_dir=tmp_path,
+        gnomad_version="4.1",
+    )
     assert len(result) == 1
     freq = result[0]
     assert freq is not None
@@ -133,6 +155,7 @@ def test_annotate_returns_frequency_for_found_variant(monkeypatch, tmp_path) -> 
 
 
 def test_annotate_chrx_par_hemizygote_zero(monkeypatch, tmp_path) -> None:
+    _make_archives(tmp_path, ("X",))
     annotations = {
         ("X", 1_000_000, "A", "G"): "gnomad_ac=3;gnomad_an=100;gnomad_nhomalt=0;gnomad_ac_xy=3",
         ("X", 50_000_000, "A", "G"): "gnomad_ac=3;gnomad_an=100;gnomad_nhomalt=0;gnomad_ac_xy=3",
@@ -141,7 +164,29 @@ def test_annotate_chrx_par_hemizygote_zero(monkeypatch, tmp_path) -> None:
 
     par, non_par = echtvar.annotate(
         ["X-1000000-A-G", "X-50000000-A-G"],
-        archive=tmp_path / "dummy.zip",
+        archives_dir=tmp_path,
+        gnomad_version="4.1",
     )
     assert par is not None and par.hemizygote_count == 0
     assert non_par is not None and non_par.hemizygote_count == 3
+
+
+def test_annotate_skips_chrom_without_archive(monkeypatch, tmp_path) -> None:
+    """A variant whose chromosome has no archive returns None (no subprocess call)."""
+    _make_archives(tmp_path, ("1",))
+    calls: list[list[str]] = []
+
+    def capturing_run(args, **kwargs):
+        calls.append(list(args))
+        return _fake_echtvar({})(args, **kwargs)
+
+    monkeypatch.setattr("variant_lookup.echtvar.subprocess.run", capturing_run)
+    result = echtvar.annotate(
+        ["1-50-C-T", "Z-100-A-G"],
+        archives_dir=tmp_path,
+        gnomad_version="4.1",
+    )
+    assert len(result) == 2
+    assert result[1] is None  # chrZ has no archive
+    # Only chr1's subprocess was invoked.
+    assert len(calls) == 1
