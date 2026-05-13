@@ -13,20 +13,37 @@ canonicalization for those, matching healthfutures-evagg's approach.
 
 import os
 import re
+from pathlib import Path
 from typing import Any, cast
 
 
 def _configure_retriever_cache() -> None:
-    """Point mutalyzer-retriever at our configured cache directory.
+    """Point mutalyzer-retriever at our cache directory and enable cache writes.
 
-    The retriever reads MUTALYZER_CACHE_DIR from its own in-memory settings
-    dict (lazily, per call), not from the environment, so we patch the dict
-    at import time. The env var ``MUTALYZER_CACHE_DIR`` overrides the
-    in-container default.
+    The retriever reads its config from an in-memory dict (``mutalyzer_retriever
+    .configuration.settings``) at call time, not from the environment, so we
+    patch the dict at import time. Two keys must both be set, or
+    ``mutalyzer_retriever.retriever.get_reference_model`` silently skips writing
+    the file cache and every call re-parses the reference from scratch:
+
+      - ``MUTALYZER_CACHE_DIR`` — where to read/write ``<accession>.annotations``
+        + ``<accession>.sequence`` files.
+      - ``MUTALYZER_FILE_CACHE_ADD`` — gates the cache-write branch in
+        ``get_reference_model``: ``if cache_add() and cache_path:``. Default is
+        unset (falsy), so writes never happen unless we explicitly enable them.
+
+    Without both, repeat calls for the same accession still pay ``parser.parse``
+    on the full reference content every request — ~20 s for a chromosome-scale
+    accession like ``NC_000016.10`` (chr16 GFF3 + FASTA).
+
+    The cache directory is created at startup so the retriever can write into it.
     """
     from mutalyzer_retriever.configuration import settings
 
-    settings["MUTALYZER_CACHE_DIR"] = os.environ.get("MUTALYZER_CACHE_DIR", "/data/mutalyzer/cache")
+    cache_dir = Path(os.environ.get("MUTALYZER_CACHE_DIR", "/data/mutalyzer/cache"))
+    cache_dir.mkdir(parents=True, exist_ok=True)
+    settings["MUTALYZER_CACHE_DIR"] = str(cache_dir)
+    settings["MUTALYZER_FILE_CACHE_ADD"] = True
 
 
 _configure_retriever_cache()
