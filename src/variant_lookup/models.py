@@ -59,3 +59,26 @@ class ResponseMeta(BaseModel):
 class VariantBatchResponse(BaseModel):
     meta: ResponseMeta
     results: list[VariantResult]
+
+
+# --- /echtvar/frequencies passthrough -------------------------------------
+# Unstable contract; mirrors the gnomAD-frequency half of the stable pipeline
+# for callers that already have pseudo-VCFs. See ARCHITECTURE.md § "Passthrough".
+
+
+class EchtvarFrequenciesRequest(BaseModel):
+    variants: list[str] = Field(
+        ...,
+        max_length=1000,
+        description="Pseudo-VCF strings, e.g. '8-42437272-C-A' (GRCh38, no chr prefix).",
+    )
+
+
+class EchtvarResult(BaseModel):
+    pseudo_vcf: str
+    frequency: Frequency | None
+
+
+class EchtvarFrequenciesResponse(BaseModel):
+    meta: dict[str, str]
+    results: list[EchtvarResult]
