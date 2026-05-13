@@ -1,0 +1,80 @@
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[project]
+name = "variant-lookup"
+version = "0.1.0"
+description = "Self-hosted REST service for variant normalization and gnomAD frequency lookups"
+readme = "README.md"
+requires-python = "==3.13.*"
+license = "MIT"
+license-files = ["LICENSE"]
+authors = [
+    { name = "Leonhard Gruenschloss", email = "leonhard@gruenschloss.org" },
+]
+dependencies = [
+    "fastapi>=0.115",
+    "uvicorn[standard]>=0.32",
+    "pydantic>=2.10",
+    "pydantic-settings>=2.7",
+    "httpx>=0.28",
+    "argon2-cffi>=23.1",
+    "pyyaml>=6.0",
+    "structlog>=24.4",
+]
+
+[dependency-groups]
+dev = [
+    "pre-commit>=4.0",
+    "ruff>=0.9",
+    "mypy>=1.13",
+    "pytest>=8.3",
+    "types-PyYAML>=6.0",
+]
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/variant_lookup"]
+
+[tool.ruff]
+target-version = "py313"
+line-length = 100
+src = ["src", "tests"]
+
+[tool.ruff.lint]
+select = [
+    "E",    # pycodestyle errors
+    "W",    # pycodestyle warnings
+    "F",    # pyflakes
+    "I",    # isort
+    "UP",   # pyupgrade
+    "B",    # flake8-bugbear
+    "C4",   # flake8-comprehensions
+    "RUF",  # ruff-specific
+    "SIM",  # flake8-simplify
+    "PTH",  # use pathlib
+    "TCH",  # type-checking imports
+    "ANN",  # require type annotations
+]
+ignore = [
+    "E501",     # line length handled by formatter
+    "ANN401",   # allow `Any` where deliberate
+]
+
+[tool.ruff.lint.per-file-ignores]
+"tests/**" = ["ANN"]  # tests don't need full annotations
+
+[tool.mypy]
+python_version = "3.13"
+strict = true
+warn_unused_ignores = true
+warn_redundant_casts = true
+warn_unreachable = true
+strict_equality = true
+check_untyped_defs = true
+disallow_untyped_defs = true
+disable_error_code = ["import-untyped"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+addopts = ["-ra", "--strict-markers", "--strict-config"]

@@ -1,0 +1,41 @@
+# Single source of truth for pre-commit + CI lint.
+# .github/workflows/ci.yml invokes `uv run pre-commit run --all-files`, so
+# adding a check here automatically runs it locally and in CI.
+
+repos:
+  - repo: https://github.com/pre-commit/pre-commit-hooks
+    rev: v5.0.0
+    hooks:
+      - id: trailing-whitespace
+      - id: end-of-file-fixer
+      - id: check-merge-conflict
+      - id: check-added-large-files
+      - id: check-toml
+      - id: check-yaml
+      - id: check-json
+      - id: debug-statements
+      - id: detect-private-key
+
+  # Use the project's pinned ruff / mypy via uv so pre-commit and CI run
+  # exactly what `uv run ruff …` produces locally — no version drift between
+  # the hook config and the resolved dependency set.
+  - repo: local
+    hooks:
+      - id: ruff-check
+        name: ruff check
+        entry: uv run ruff check
+        language: system
+        types_or: [python, pyi]
+        pass_filenames: false
+      - id: ruff-format
+        name: ruff format --check
+        entry: uv run ruff format --check
+        language: system
+        types_or: [python, pyi]
+        pass_filenames: false
+      - id: mypy
+        name: mypy
+        entry: uv run mypy src/
+        language: system
+        types_or: [python, pyi]
+        pass_filenames: false

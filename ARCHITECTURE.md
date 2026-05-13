@@ -1,0 +1,304 @@
+# Architecture
+
+Self-hosted REST service for variant normalization and gnomAD v4 frequency lookups. Replaces a chain of rate-limited / unreliable external services (Mutalyzer, VariantValidator, gnomAD GraphQL) used by upstream callers extracting variants from biomedical literature.
+
+This document is the source of truth for the system's shape, the boundaries between components, and the constraints (especially AGPL — see §"AGPL boundary") that future contributors must respect. Audience: LLM assistants and humans onboarding to the repo.
+
+## Pipeline
+
+Input: a batch of variant records `{id, gene, hgnc_id, variant, genome_build?}`, where `variant` is whatever messy HGVS-like or `rs…` string an LLM extracted from a paper.
+
+Per-variant chain:
+
+1. **Parse + clean** the raw `variant` string into a canonical HGVS description with a RefSeq accession. ~50 lines of cleanup regex handle missing prefixes, single↔three-letter amino-acid codes, embedded gene symbols, stray punctuation, etc. _Derived from Microsoft's `healthfutures-evagg` (MIT)._
+2. **If input is `rs…`**: call NCBI E-utils `efetch?db=snp` (HTTP, external) to resolve the rsID to a canonical HGVS description.
+3. **Normalize** the HGVS description by calling `mutalyzer.normalizer.normalize(...)` (in-process — the Mutalyzer Python library is MIT-licensed).
+4. **If input is `p.…`**: call `mutalyzer.back_translator.back_translate(...)` (in-process). Back-translation can return *multiple* coding variants for one protein change (different codons), each of which is carried forward and returned in the response — no policy choice is baked in at the service layer.
+5. **HGVS → genomic coordinates**: call VariantValidator (HTTP, sibling container) at `/VariantValidator/variantvalidator/GRCh38/{hgvs}/mane_select`. VV returns the GRCh38 pseudo-VCF (`chrom-pos-ref-alt`) plus the MANE-select HGVS-c / HGVS-p strings. For inputs that arrived as GRCh37 chromosomal coordinates, the cross-assembly projection happens implicitly inside VV (we always request `/GRCh38/`).
+6. **Pseudo-VCF → frequencies**: write a tiny sorted VCF, subprocess `echtvar anno` against the local `gnomad.joint.v4.1.echtvar.zip` archive, parse the annotated VCF back. echtvar's binary search inside 1 MB chunks gives ~1M lookups/sec offline.
+7. **Hemizygote derivation**: echtvar exposes `AC_joint_XY` but not a hemizygote count; we compute it in-process (0 for autosomes + PAR regions, `AC_XY` elsewhere on chrX/Y).
+8. **Response assembly**: combine normalized HGVS, pseudo-VCF, frequencies, and per-variant errors into the response object. Versions of every component are stamped in `meta`.
+
+## What runs where
+
+Two services in compose (plus an nginx sidecar for TLS):
+
+| Service | Purpose | Process boundary | License |
+|---|---|---|---|
+| `gateway` (FastAPI, ours) | REST API, parsing/cleanup, Mutalyzer calls (in-process), echtvar subprocess, NCBI HTTP calls, VV HTTP calls, response assembly | one Python process | MIT |
+| `variantvalidator` (upstream image, unmodified) | HGVS → GRCh38 pseudo-VCF + MANE-select transcripts | sibling container, HTTP only | **AGPL-3.0-only** |
+| `nginx` (sidecar) | TLS termination, reverse proxy in front of `gateway` | sibling container | BSD-2-Clause |
+
+Mutalyzer is **in-process** because the library is MIT-licensed and importable. echtvar is **subprocess** because it's a CLI tool and the per-batch overhead (~10-30ms for fork + binary load) is irrelevant at our target throughput. VariantValidator is **HTTP-only across a container boundary** because it is AGPL — see §"AGPL boundary".
+
+VariantValidator's own deployment has internal dependencies (MySQL + PostgreSQL + SeqRepo containers) that come from the upstream `docker-compose.yml`. We **vendor four upstream repos under `vendor/`** at pinned SHAs (rest_variantValidator, variantValidator, variantFormatter, vv_hgvs — see `.env.example`) and bring the upstream compose stack up alongside ours. The vendored sources are **not part of our service** — they belong to the AGPL surface and live outside `src/`.
+
+Tagged releases of these repos lag well behind production (e.g. `variantValidator` v3.0.1 vs. the v3.0.2+dev that `rest.variantvalidator.org` runs), so pinning master HEADs at the time of deploy gives us a build closer to upstream production than any tag would. Pinned SHAs in `.env` are the source of truth; bump them deliberately when adopting upstream changes.
+
+**Note for future contributors**: the SHA strings the public `rest.variantvalidator.org` banner shows for `rest_variantValidator` and `variantValidator` (e.g. `7edab06bc`, `b64f3e1fb` as of mid-2026) are **not reachable** in the public openvar repos — they appear to live on a private branch or fork. `variantFormatter` and `vv_hgvs` prod SHAs *are* on public master. Don't waste time hunting the missing ones; pin current public master HEADs (or a deliberately chosen older public commit) instead.
+
+## Public API
+
+### `POST /v1/variants`
+
+Authenticated bulk lookup. Max 1000 variants per request (rejected with 413 above that).
+
+Request:
+
+```json
+{
+  "genome_build": "GRCh38",
+  "variants": [
+    {"id": "v1", "gene": "SLC20A2", "hgnc_id": 11013, "variant": "c.1240G>T"},
+    {"id": "v2", "gene": "PDGFB",   "hgnc_id": 8804,  "variant": "p.Arg191*"}
+  ]
+}
+```
+
+Response (always 200 unless the request itself is malformed, auth fails, or the service is broken):
+
+```json
+{
+  "meta": {
+    "service": "0.1.0+abc123",
+    "reference": "GRCh38",
+    "gnomad": "4.1",
+    "variantvalidator": "2.2.0",
+    "mutalyzer": "3.0.4",
+    "timestamp": "2026-05-13T..."
+  },
+  "results": [
+    {
+      "id": "v1",
+      "input": {"gene": "SLC20A2", "hgnc_id": 11013, "variant": "c.1240G>T"},
+      "normalized": [
+        {
+          "pseudo_vcf": "8-42437272-C-A",
+          "hgvs_c": "NM_001257180.2:c.1240G>T",
+          "hgvs_p": "NP_001244109.1:p.Glu414Ter",
+          "frequency": {
+            "ac": 0, "an": 1614174, "homozygote_count": 0,
+            "hemizygote_count": 0, "faf95_popmax": null, "faf95_popmax_population": null
+          }
+        }
+      ],
+      "error": null
+    },
+    {
+      "id": "v2",
+      "input": {"gene": "PDGFB", "hgnc_id": 8804, "variant": "p.Arg191*"},
+      "normalized": null,
+      "error": {
+        "code": "NORMALIZATION_FAILED",
+        "upstream": "mutalyzer",
+        "message": "..."
+      }
+    }
+  ]
+}
+```
+
+Key contract points:
+
+- **`normalized` is a list**, even for non-ambiguous inputs. Protein variants can back-translate to multiple coding variants; the service returns them all and leaves selection (max-AC, all, etc.) to the caller.
+- **Per-variant `error` field** is the failure surface. The HTTP response stays 200 even if every variant in the batch fails; callers iterate.
+- **`meta` is always present** and contains the versions of every component used to produce the results, so callers can pin/cite/reproduce.
+- **`variant_not_found` in gnomAD** is not an error — it's a `frequency` object with `ac: 0` and nulls for FAF. Distinguishable from an actual gnomAD lookup error by inspecting `error`.
+
+### `GET /healthz`
+
+Returns 200 with `{"status": "ok"}` if the FastAPI process is alive. Used by docker-compose healthchecks.
+
+### `GET /readyz`
+
+Returns 200 with a per-upstream breakdown if everything is reachable; 503 if any required upstream is down.
+
+```json
+{
+  "status": "ready",
+  "upstreams": {
+    "variantvalidator": "ok",
+    "echtvar_archive": {"status": "ok", "version": "gnomad-4.1"},
+    "refseq_cache": "ok"
+  }
+}
+```
+
+### `GET /docs`, `GET /openapi.json`
+
+FastAPI-generated. Behind the same API-key auth as everything else.
+
+### Auth
+
+`Authorization: Bearer <api-key>`. Keys are random high-entropy tokens. The server stores **argon2id hashes** (per-key salt embedded in the hash string) in a config file mounted from outside the container. Reload requires a service restart. No account management, no JWT issuance — adding/revoking a key is editing the file. No rate limiting in v1.
+
+### Errors at the HTTP layer
+
+- `400` — malformed request body
+- `401` — missing/invalid bearer token
+- `413` — batch larger than 1000
+- `503` — service or required upstream unavailable (paired with `/readyz` failing)
+- `500` — internal error (bug in the gateway)
+
+Per-variant errors are *never* at the HTTP layer — always `200` with `results[i].error` populated.
+
+## Configuration
+
+All deployment-specific values come from a `.env` file that is **not** committed. Nothing about the host, cluster, or cert layout leaks into committed code. The full set:
+
+```
+# Storage
+DATA_DIR=/some/host/path                  # parent dir containing all reference data
+SSL_CERT_PATH=/some/host/path/certs       # dir containing the TLS cert + key + chain
+API_KEYS_HOST_FILE=/some/host/path/api-keys.yaml
+
+# Network
+NGINX_PORT=9443                           # external HTTPS port
+
+# Upstreams
+NCBI_EUTILS_EMAIL=...                     # required by NCBI
+NCBI_EUTILS_API_KEY=...                   # optional, raises NCBI rate limit
+
+# Pinned upstream VariantValidator SHAs (AGPL — see "AGPL boundary")
+VV_REST_SHA=...
+VV_LIB_SHA=...
+VV_FORMATTER_SHA=...
+VV_HGVS_SHA=...
+
+# Pinned echtvar precompiled release (for the gateway image build)
+ECHTVAR_VERSION=v0.2.4
+
+# Versions stamped into responses
+SERVICE_VERSION=0.1.0+<git-sha>
+GNOMAD_VERSION=4.1
+VARIANTVALIDATOR_VERSION=...              # derived from pinned SHAs
+MUTALYZER_VERSION=...                     # set per pip-installed version
+```
+
+## Reference data layout
+
+Single `${DATA_DIR}` host mount, subdirectories per dataset, mounted read-only into the gateway except where the upstream tool writes:
+
+```
+${DATA_DIR}/
+  echtvar/
+    gnomad.joint.v4.1.echtvar.zip       # ~3-4 GB, encoded from gnomAD v4.1 joint VCFs
+  refseq/
+    refseq_processed.json               # MANE-Select / RefSeq-Select index by gene symbol
+                                        # (also indexed by versionless accession for autocomplete)
+  mutalyzer/
+    cache/                              # mutalyzer/retriever's reference sequence cache (writable)
+  variantvalidator/                     # belongs to the AGPL VV service
+    seqdata/                            # SeqRepo (writable)
+    vdb-mysql/                          # VV MySQL data
+    vvta-postgres/                      # UTA PostgreSQL data
+    logs/
+```
+
+In-container paths are `/data/<dataset>/...` — code references only those, never the host path.
+
+Reference data is **manually refreshed** in v1. A single `scripts/setup.sh` script handles both first-time bootstrap and per-dataset refresh via subcommands (`vendor-vv`, `build-vv`, `refresh-echtvar`, `refresh-refseq`, `build-gateway`). Each step is idempotent — re-running skips work that's already done.
+
+| Dataset | Source | Refresh trigger | Subcommand | Approx work |
+|---|---|---|---|---|
+| echtvar archive | gnomAD release notes | gnomAD point releases (rare) | `refresh-echtvar` | ~1-2 h sequential encode of 24 chromosome VCFs |
+| refseq_processed.json | NCBI RefSeq GFF | New GRCh38 patch (every ~6 mo) | `refresh-refseq` | minutes |
+| Mutalyzer cache | NCBI on first use | Auto-warmed; manual flush if NCBI changes a record | n/a (auto) | n/a |
+| VV seqdata / vvta / vdb | VV upstream pinned SHAs | When bumping any `VV_*_SHA` | `vendor-vv` + `build-vv` | ~1 h compile + ~30 min db init |
+
+## Versioning
+
+URL versioning at `/v1/`. Breaking response-shape changes get a new prefix. Data-layer versions go into the `meta` block, so the same `/v1/` endpoint can return data from different gnomAD releases over time — callers should record the `meta.gnomad` value alongside the results.
+
+## AGPL boundary
+
+VariantValidator is licensed **AGPL-3.0-only**. Our service is MIT. The boundary that keeps these compatible is the **HTTP-over-network call** between the `gateway` container and the `variantvalidator` container.
+
+### What this means in practice — DO
+
+- Run the upstream `variantvalidator` Docker image **unmodified**. Pin a specific upstream tag.
+- Speak to it via HTTP only, exactly like any external API.
+- Document the AGPL dependency in `README.md` and `ARCHITECTURE.md`. Link to the upstream source.
+- Ship the gateway image and VV image as **separate** images, each with their own license metadata.
+
+### What this means in practice — DON'T
+
+- **DON'T** `pip install` VariantValidator into the gateway image — that would link our code to AGPL code in-process and trigger the copyleft.
+- **DON'T** `from VariantValidator import ...` anywhere in the gateway code, for the same reason.
+- **DON'T** bundle VV's source files, binaries, or databases into the gateway image build context.
+- **DON'T** modify VariantValidator. Any patch to VV must be applied in a fork that is itself AGPL — and AGPL §13 then requires the fork's source to be available to anyone interacting with the service over the network.
+- **DON'T** remove the AGPL attribution / upstream-source link from documentation.
+
+### Why Mutalyzer is different
+
+Mutalyzer is MIT-licensed. Importing `mutalyzer` directly in the gateway is fine and doesn't constrain our license. If Mutalyzer ever relicenses (e.g. to GPL/AGPL), revisit and move it across the same HTTP boundary VV sits behind.
+
+### If the boundary needs to move
+
+If at some point we want to bundle, patch, or extend VariantValidator's behavior, the choices are:
+- Accept that the combined service goes AGPL (and offer source under §13). Possible but a real policy decision.
+- Switch to an alternative library with a permissive license — biocommons `hgvs` (Apache-2.0) covers some of VV's responsibilities; not a drop-in.
+
+Neither is in scope for v1.
+
+## Components and responsibilities
+
+### `gateway` (this repo)
+
+- `app/api.py` — FastAPI routes, auth, request validation, response shaping, `meta` assembly.
+- `app/pipeline.py` — orchestrates the per-variant chain (parse → normalize → coords → freq).
+- `app/normalize.py` — variant-string cleanup regex + HGVS construction.
+- `app/mutalyzer_client.py` — in-process wrapper around `mutalyzer.normalizer.normalize` and `mutalyzer.back_translator.back_translate`. Translates Mutalyzer's error shapes into our `error` codes.
+- `app/variantvalidator_client.py` — HTTP client for the sibling VV container.
+- `app/echtvar.py` — sorted-VCF generation, `echtvar anno` subprocess, annotated-VCF parsing, hemizygote derivation.
+- `app/ncbi.py` — rsID resolution against NCBI E-utils. External HTTP. API key in env.
+- `app/refseq.py` — in-process `refseq_processed.json` lookup. Resolves gene symbol → MANE-Select transcript/protein/genomic accession, and versionless accession → versioned (replaces NCBI's accession-autocomplete).
+- `app/auth.py` — argon2id key verification.
+- `app/health.py` — `/healthz`, `/readyz`.
+- `app/config.py` — env-var loading and validation. **All paths and URLs come from env.**
+- `scripts/setup.sh` — one-shot bootstrap and per-dataset refresh; see "Reference data layout" for the subcommands.
+
+### `variantvalidator` (vendored upstream sources)
+
+- Four upstream repos (`rest_variantValidator`, `variantValidator`, `variantFormatter`, `vv_hgvs`) cloned under `vendor/` at SHAs pinned in `.env`. `scripts/setup.sh vendor-vv` checks them out; `scripts/setup.sh build-vv` builds their docker images.
+- Includes the VV REST API container, MySQL, PostgreSQL (UTA), and SeqRepo.
+- Bind-mounts from `${DATA_DIR}/variantvalidator/*` for persistence.
+- Health-checked by the gateway's `/readyz`.
+- **Pin master HEADs, not tags** — tagged releases lag production by months. See `.env.example` for the current pinned set.
+
+### `nginx` (sidecar)
+
+- TLS termination on `${NGINX_PORT:-9443}`.
+- Cert + key + chain mounted from `${SSL_CERT_PATH}` at `/etc/nginx/ssl` (in-container path only).
+- Reverse-proxies all paths to `gateway:8000` over plain HTTP on the internal Docker network.
+- Conf file (`nginx.conf`) committed; cert paths referenced only by their in-container locations.
+
+## Logging
+
+All services log JSON to stdout. Gateway log lines carry:
+- `timestamp`, `level`, `service`, `request_id` (per-request UUID)
+- `event` — high-cardinality discriminator (`request_received`, `upstream_call`, `variant_error`, …)
+- structured fields per event (`upstream`, `latency_ms`, `variant_id`, `error_code`, …)
+
+No PII; we don't log API keys or full bearer tokens (truncate to first 8 chars + length).
+
+## Out of scope for v1
+
+These are deferred deliberately, not forgotten:
+
+- **Caching**. Variants recur across papers; a normalization-input → result cache (SQLite or Redis) is the natural next optimization. Add it once per-variant latency is shown to be the bottleneck.
+- **Rate limiting per API key**. Internal use only; we'll add a per-key token bucket if abuse emerges.
+- **echtvar Python bindings**. The library API (`EchtVars::open` + `update_expr_values` + `Variant` trait) is small and PyO3 bindings are ~200 lines of Rust — feasible but the ~10-30ms subprocess overhead per batch is not the bottleneck given upstream latencies. Revisit if echtvar overhead dominates.
+- **Async / streaming responses**. The sync bulk POST fits 100 v/s bursty traffic fine. Move to streaming or async jobs only if a single request needs > a few seconds.
+- **Mitochondrial variants (chrM)**. gnomAD treats these as a separate dataset with different schema. Inputs with `m.` HGVS will currently fail at the frequency-lookup step. Not in scope; add when needed.
+- **Caller-supplied selection policies** (max-AC, etc.). The service returns all back-translations; callers pick.
+
+## Credits
+
+- **Microsoft `healthfutures-evagg`** ([github.com/microsoft/healthfutures-evagg](https://github.com/microsoft/healthfutures-evagg), MIT) — portions of the variant cleanup + normalization logic in `app/normalize.py` are derived from this project.
+- **Mutalyzer** (`mutalyzer/mutalyzer`, MIT, Leiden University Medical Center) — used in-process for HGVS normalization and protein-to-coding back-translation.
+- **VariantValidator** (`openvar/variantValidator` and `openvar/rest_variantValidator`, **AGPL-3.0-only**, Leicester) — used as a sibling container for HGVS-to-genomic-coordinates resolution. See §"AGPL boundary".
+- **echtvar** (`brentp/echtvar`, MIT, Brent Pedersen) — used as a subprocess for offline gnomAD frequency annotation.
+- **gnomAD v4.1** (Broad Institute, public-domain data) — frequency data, encoded into the echtvar archive once and looked up offline.
+- **NCBI E-utilities** — used externally over HTTPS for rsID → HGVS resolution.
+- **NCBI RefSeq** — public-domain reference data, processed into a local gene-symbol-and-accession index.

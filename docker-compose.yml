@@ -1,0 +1,65 @@
+# variant-lookup deployment.
+#
+# All deployment-specific values come from .env (copy .env.example, fill in).
+#
+# This file declares the gateway and nginx services. The VariantValidator
+# stack — built from pinned upstream SHAs, AGPL-3.0-only — is vendored under
+# vendor/ by scripts/setup.sh and brought up alongside this compose stack:
+#
+#   ./scripts/setup.sh                  # one-time bootstrap (clone + build VV, etc.)
+#   docker compose \
+#     -f docker-compose.yml \
+#     -f vendor/rest_variantValidator/docker-compose.yml \
+#     up -d
+#
+# The separation keeps the AGPL boundary explicit: VariantValidator's
+# upstream sources are checked out under vendor/ at a pinned SHA, built into
+# their own images, and communicated with over HTTP only. They are not
+# bundled into the gateway image. See ARCHITECTURE.md § "AGPL boundary".
+
+services:
+  gateway:
+    image: variant-lookup-gateway:latest
+    build:
+      context: .
+      dockerfile: Dockerfile
+      args:
+        ECHTVAR_VERSION: ${ECHTVAR_VERSION:-v0.2.4}
+    environment:
+      API_KEYS_FILE: /etc/variant-lookup/api-keys.yaml
+      VV_BASE_URL: http://variantvalidator:8000
+      ECHTVAR_BIN: echtvar
+      ECHTVAR_ARCHIVE: /data/echtvar/gnomad.joint.v4.1.echtvar.zip
+      NCBI_EUTILS_EMAIL: ${NCBI_EUTILS_EMAIL}
+      NCBI_EUTILS_API_KEY: ${NCBI_EUTILS_API_KEY:-}
+      SERVICE_VERSION: ${SERVICE_VERSION:-0.1.0+dev}
+      GNOMAD_VERSION: ${GNOMAD_VERSION:-4.1}
+      VARIANTVALIDATOR_VERSION: ${VARIANTVALIDATOR_VERSION:-unknown}
+      MUTALYZER_VERSION: ${MUTALYZER_VERSION:-unknown}
+    volumes:
+      - ${DATA_DIR}/echtvar:/data/echtvar:ro
+      - ${DATA_DIR}/refseq:/data/refseq:ro
+      - ${DATA_DIR}/mutalyzer:/data/mutalyzer
+      - ${API_KEYS_HOST_FILE}:/etc/variant-lookup/api-keys.yaml:ro
+    restart: always
+    healthcheck:
+      test:
+        - CMD
+        - python
+        - -c
+        - "import urllib.request; urllib.request.urlopen('http://localhost:8000/healthz').read()"
+      interval: 30s
+      timeout: 5s
+      retries: 3
+
+  nginx:
+    image: nginx:1.29-alpine
+    ports:
+      - "${NGINX_PORT:-9443}:9443"
+    volumes:
+      - ./nginx.conf:/etc/nginx/conf.d/default.conf:ro
+      - ${SSL_CERT_PATH}:/etc/nginx/ssl:ro
+    depends_on:
+      gateway:
+        condition: service_started
+    restart: always

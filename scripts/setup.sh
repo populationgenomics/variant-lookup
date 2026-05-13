@@ -1,0 +1,165 @@
+#!/usr/bin/env bash
+# One-shot bootstrap + per-dataset refresh for variant-lookup.
+#
+# Subcommands:
+#   ./scripts/setup.sh                  # full bootstrap (everything in order)
+#   ./scripts/setup.sh vendor-vv        # clone the VariantValidator repos and check out pinned SHAs
+#   ./scripts/setup.sh build-vv         # build VariantValidator's docker images (slow, ~1 h)
+#   ./scripts/setup.sh refresh-echtvar  # download gnomAD VCFs and encode the echtvar archive
+#   ./scripts/setup.sh refresh-refseq   # rebuild the RefSeq MANE-Select index
+#   ./scripts/setup.sh build-gateway    # build the gateway image
+#
+# Reads .env for DATA_DIR and pinned SHAs. All steps are idempotent.
+# Host requirements: bash, git, curl, docker (+ docker compose).
+# echtvar runs only inside the gateway image via `docker run`, so the host
+# does not need echtvar (or any other bioinformatics tooling) installed.
+
+set -euo pipefail
+
+REPO_ROOT="$(cd "$(dirname "$0")/.." && pwd)"
+ENV_FILE="${REPO_ROOT}/.env"
+[ -f "${ENV_FILE}" ] || { echo "ERROR: ${ENV_FILE} missing — copy .env.example first." >&2; exit 1; }
+set -a; . "${ENV_FILE}"; set +a
+
+: "${DATA_DIR:?DATA_DIR must be set in .env}"
+: "${VV_REST_SHA:?VV_REST_SHA must be set in .env}"
+: "${VV_LIB_SHA:?VV_LIB_SHA must be set in .env}"
+: "${VV_FORMATTER_SHA:?VV_FORMATTER_SHA must be set in .env}"
+: "${VV_HGVS_SHA:?VV_HGVS_SHA must be set in .env}"
+
+VENDOR_DIR="${REPO_ROOT}/vendor"
+IMAGE_TAG="variant-lookup-gateway:latest"
+
+log() { printf '==> %s\n' "$*"; }
+
+require_gateway_image() {
+    if ! docker image inspect "${IMAGE_TAG}" >/dev/null 2>&1; then
+        echo "ERROR: ${IMAGE_TAG} not built — run '$0 build-gateway' first." >&2
+        exit 1
+    fi
+}
+
+vendor_vv() {
+    log "Vendoring VariantValidator (AGPL-3.0-only) at pinned SHAs"
+    mkdir -p "${VENDOR_DIR}"
+    local entries=(
+        "rest_variantValidator:${VV_REST_SHA}"
+        "variantValidator:${VV_LIB_SHA}"
+        "variantFormatter:${VV_FORMATTER_SHA}"
+        "vv_hgvs:${VV_HGVS_SHA}"
+    )
+    for entry in "${entries[@]}"; do
+        local name="${entry%%:*}"
+        local sha="${entry##*:}"
+        local dir="${VENDOR_DIR}/${name}"
+        if [ -d "${dir}/.git" ]; then
+            git -C "${dir}" fetch --quiet origin
+        else
+            git clone --quiet "https://github.com/openvar/${name}" "${dir}"
+        fi
+        git -C "${dir}" checkout --quiet --detach "${sha}"
+        printf '    %-26s @ %s\n' "${name}" "${sha}"
+    done
+}
+
+build_vv() {
+    [ -d "${VENDOR_DIR}/rest_variantValidator" ] \
+        || { echo "ERROR: run vendor-vv first." >&2; exit 1; }
+    log "Building VariantValidator images (first build ~1 h)"
+    ( cd "${VENDOR_DIR}/rest_variantValidator" && docker compose build )
+}
+
+refresh_echtvar() {
+    require_gateway_image
+    local stage="${DATA_DIR}/echtvar/staging"
+    local build="${DATA_DIR}/echtvar/build"
+    mkdir -p "${stage}" "${build}"
+
+    log "Downloading gnomAD v4.1 joint VCFs to ${stage}"
+    for chr in {1..22} X Y; do
+        local f="gnomad.joint.v4.1.sites.chr${chr}.vcf.bgz"
+        if [ -f "${stage}/${f}" ]; then
+            printf '    %s present, skipping\n' "${f}"
+        else
+            curl -fsSL --output "${stage}/${f}" \
+                "https://gnomad-public-us-east-1.s3.amazonaws.com/release/4.1/vcf/joint/${f}"
+        fi
+    done
+
+    log "Writing echtvar field config"
+    cat > "${build}/gnomad.v4.1.joint.json" <<'JSON'
+[
+    {"field": "AC_joint", "alias": "gnomad_ac"},
+    {"field": "AN_joint", "alias": "gnomad_an"},
+    {"field": "nhomalt_joint", "alias": "gnomad_nhomalt"},
+    {"field": "AC_joint_XY", "alias": "gnomad_ac_xy"},
+    {"field": "fafmax_faf95_max_joint", "alias": "gnomad_faf95_max", "multiplier": 2000000},
+    {"field": "fafmax_faf95_max_gen_anc_joint", "alias": "gnomad_faf95_max_gen_anc"}
+]
+JSON
+
+    log "Encoding echtvar archive via ${IMAGE_TAG} (~1-2 h)"
+    local vcf_args=()
+    for chr in {1..22} X Y; do
+        vcf_args+=("/stage/gnomad.joint.v4.1.sites.chr${chr}.vcf.bgz")
+    done
+    docker run --rm \
+        --user "$(id -u):$(id -g)" \
+        -v "${stage}:/stage:ro" \
+        -v "${build}:/build" \
+        --workdir /build \
+        "${IMAGE_TAG}" \
+        echtvar encode \
+            gnomad.joint.v4.1.echtvar.zip \
+            gnomad.v4.1.joint.json \
+            "${vcf_args[@]}"
+
+    mv -f "${build}/gnomad.joint.v4.1.echtvar.zip" "${DATA_DIR}/echtvar/"
+    log "Wrote ${DATA_DIR}/echtvar/gnomad.joint.v4.1.echtvar.zip"
+}
+
+refresh_refseq() {
+    log "Refreshing RefSeq MANE-Select / Select index"
+    echo "    TODO: port palit's _RefSeqClient._process_raw_resource to a standalone script."
+    echo "    Target output: ${DATA_DIR}/refseq/refseq_processed.json"
+}
+
+build_gateway() {
+    log "Building gateway image"
+    ( cd "${REPO_ROOT}" && docker compose build gateway )
+}
+
+bootstrap() {
+    vendor_vv
+    build_vv
+    build_gateway      # must precede refresh_echtvar (encode runs inside this image)
+    refresh_echtvar
+    refresh_refseq
+    cat <<EOF
+
+Bootstrap complete. Bring the stack up with:
+
+  docker compose \\
+    -f docker-compose.yml \\
+    -f vendor/rest_variantValidator/docker-compose.yml \\
+    up -d
+
+EOF
+}
+
+case "${1:-bootstrap}" in
+    bootstrap)       bootstrap ;;
+    vendor-vv)       vendor_vv ;;
+    build-vv)        build_vv ;;
+    refresh-echtvar) refresh_echtvar ;;
+    refresh-refseq)  refresh_refseq ;;
+    build-gateway)   build_gateway ;;
+    -h|--help|help)
+        sed -n '2,15p' "$0"
+        ;;
+    *)
+        echo "Unknown subcommand: $1" >&2
+        echo "Run '$0 --help' for usage." >&2
+        exit 2
+        ;;
+esac
