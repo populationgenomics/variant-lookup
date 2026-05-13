@@ -1,8 +1,11 @@
 """FastAPI application factory and route declarations."""
 
+import uuid
+from collections.abc import Awaitable, Callable
 from typing import Annotated, Any
 
 import httpx
+import structlog
 from fastapi import Depends, FastAPI, HTTPException, Request, Response, status
 
 from variant_lookup import __version__, echtvar, mutalyzer_client
@@ -31,6 +34,23 @@ def create_app() -> FastAPI:
         docs_url="/docs",
         openapi_url="/openapi.json",
     )
+
+    @app.middleware("http")
+    async def _request_id(
+        request: Request,
+        call_next: Callable[[Request], Awaitable[Response]],
+    ) -> Response:
+        """Bind a per-request UUID into structlog's contextvars and echo it
+        back as `X-Request-ID`. If the caller already supplied that header,
+        honor it (lets external tracing flow through)."""
+        request_id = request.headers.get("x-request-id") or str(uuid.uuid4())
+        structlog.contextvars.bind_contextvars(request_id=request_id)
+        try:
+            response = await call_next(request)
+        finally:
+            structlog.contextvars.clear_contextvars()
+        response.headers["X-Request-ID"] = request_id
+        return response
 
     @app.get("/healthz")
     def _healthz() -> dict[str, str]:

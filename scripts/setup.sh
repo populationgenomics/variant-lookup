@@ -9,6 +9,7 @@
 #   ./scripts/setup.sh refresh-echtvar  # download gnomAD VCFs and encode the echtvar archive
 #   ./scripts/setup.sh refresh-refseq   # rebuild the RefSeq MANE-Select index
 #   ./scripts/setup.sh build-gateway    # build the gateway image
+#   ./scripts/setup.sh cleanup-echtvar-staging  # delete VCF staging dir after successful encode
 #
 # Reads .env for DATA_DIR and pinned SHAs. All steps are idempotent.
 # Host requirements: bash, git, curl, docker (+ docker compose).
@@ -160,6 +161,21 @@ build_gateway() {
     ( cd "${REPO_ROOT}" && docker compose build gateway )
 }
 
+cleanup_echtvar_staging() {
+    # Once the encoded archive exists, the source VCFs (~700 GB) can go.
+    # Sanity-check that the archive is present and non-empty before deleting.
+    local archive="${DATA_DIR}/echtvar/gnomad.joint.v4.1.echtvar.zip"
+    local stage="${DATA_DIR}/echtvar/staging"
+    local build="${DATA_DIR}/echtvar/build"
+    if [ ! -s "${archive}" ]; then
+        echo "ERROR: ${archive} missing or empty — refusing to delete staging." >&2
+        exit 1
+    fi
+    log "Removing staging VCFs at ${stage} and ${build}"
+    rm -rf "${stage}" "${build}"
+    log "Done. Archive preserved at ${archive}"
+}
+
 bootstrap() {
     vendor_vv
     ensure_vv_data_dirs
@@ -181,13 +197,14 @@ EOF
 }
 
 case "${1:-bootstrap}" in
-    bootstrap)        bootstrap ;;
-    vendor-vv)        vendor_vv ;;
-    ensure-vv-dirs)   ensure_vv_data_dirs ;;
-    build-vv)         build_vv ;;
-    refresh-echtvar)  refresh_echtvar ;;
-    refresh-refseq)   refresh_refseq ;;
-    build-gateway)    build_gateway ;;
+    bootstrap)                  bootstrap ;;
+    vendor-vv)                  vendor_vv ;;
+    ensure-vv-dirs)             ensure_vv_data_dirs ;;
+    build-vv)                   build_vv ;;
+    refresh-echtvar)            refresh_echtvar ;;
+    refresh-refseq)             refresh_refseq ;;
+    build-gateway)              build_gateway ;;
+    cleanup-echtvar-staging)    cleanup_echtvar_staging ;;
     -h|--help|help)
         sed -n '2,15p' "$0"
         ;;
