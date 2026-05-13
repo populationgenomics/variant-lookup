@@ -6,6 +6,7 @@ from typing import Annotated, Any
 
 import httpx
 import structlog
+from Bio import Entrez
 from fastapi import Depends, FastAPI, HTTPException, Request, Response, status
 
 from variant_lookup import __version__, echtvar, mutalyzer_client
@@ -27,6 +28,17 @@ from variant_lookup.variantvalidator_client import VariantValidatorClient
 
 def create_app() -> FastAPI:
     configure_logging()
+
+    # Mutalyzer's reference-sequence retriever uses biopython's Bio.Entrez
+    # internally; biopython refuses to make E-utils calls (and warns) unless
+    # its module-level Entrez.email is set. Pull it from the same setting we
+    # use for our own NCBI client so the two paths agree.
+    # Biopython's stubs type Entrez.email / api_key as None (their
+    # uninitialised state); they're meant to be assigned strings by users.
+    settings = get_settings()
+    Entrez.email = settings.ncbi_eutils_email  # type: ignore[assignment]
+    if settings.ncbi_eutils_api_key:
+        Entrez.api_key = settings.ncbi_eutils_api_key  # type: ignore[assignment]
 
     app = FastAPI(
         title="variant-lookup",
