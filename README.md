@@ -30,7 +30,7 @@ cp .env.example .env
 $EDITOR .env
 ```
 
-Fill in at least `DATA_DIR` (host path with ≥1 TB free for the transient gnomAD download), `SSL_CERT_PATH` (dir containing `cert.pem`/`key.pem`/`ca.pem`), `API_KEYS_HOST_FILE` (we'll create this in step 3), and `NCBI_EUTILS_EMAIL`. `NCBI_EUTILS_API_KEY` is optional (raises NCBI's rate limit 3→10 req/s).
+Fill in at least `DATA_DIR` (host path with ≥1 TB free for the transient gnomAD download), `SSL_CERT_FILE` + `SSL_KEY_FILE` (absolute paths to your server cert chain and private key — files are bind-mounted individually, so any host filenames work), `API_KEYS_HOST_FILE` (we'll create this in step 3), and `NCBI_EUTILS_EMAIL`. `NCBI_EUTILS_API_KEY` is optional (raises NCBI's rate limit 3→10 req/s).
 
 ### 2. Bootstrap
 

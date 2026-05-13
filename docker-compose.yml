@@ -64,10 +64,15 @@ services:
   nginx:
     image: nginx:1.29-alpine
     ports:
-      - "${NGINX_PORT:-9443}:9443"
+      - "${NGINX_PORT:-9443}:443"
     volumes:
       - ./nginx.conf:/etc/nginx/conf.d/default.conf:ro
-      - ${SSL_CERT_PATH}:/etc/nginx/ssl:ro
+      # Mount the two TLS files individually at the names nginx.conf expects,
+      # so the host filenames can be anything. The bind mount preserves host
+      # UIDs/perms; nginx's master process runs as root inside the container,
+      # so root-only key files on the host are readable without copying.
+      - ${SSL_CERT_FILE}:/etc/nginx/ssl/cert.pem:ro
+      - ${SSL_KEY_FILE}:/etc/nginx/ssl/key.pem:ro
     depends_on:
       gateway:
         condition: service_started

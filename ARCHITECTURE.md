@@ -162,7 +162,8 @@ All deployment-specific values come from a `.env` file that is **not** committed
 ```
 # Storage
 DATA_DIR=/some/host/path                  # parent dir containing all reference data
-SSL_CERT_PATH=/some/host/path/certs       # dir containing the TLS cert + key + chain
+SSL_CERT_FILE=/some/host/path/server-cert-plus-intermediates.pem
+SSL_KEY_FILE=/some/host/path/server.key   # may be root-only readable; nginx-as-root in container reads it via the bind mount
 API_KEYS_HOST_FILE=/some/host/path/api-keys.yaml
 
 # Network
@@ -286,7 +287,7 @@ Neither is in scope for v1.
 ### `nginx` (sidecar)
 
 - TLS termination on `${NGINX_PORT:-9443}`.
-- Cert + key + chain mounted from `${SSL_CERT_PATH}` at `/etc/nginx/ssl` (in-container path only).
+- Cert + key bind-mounted **individually** at `/etc/nginx/ssl/cert.pem` and `/etc/nginx/ssl/key.pem` from `${SSL_CERT_FILE}` and `${SSL_KEY_FILE}` on the host. nginx's master process runs as root inside the container so a root-only host key file is readable without copying.
 - Reverse-proxies all paths to `gateway:8000` over plain HTTP on the internal Docker network.
 - Conf file (`nginx.conf`) committed; cert paths referenced only by their in-container locations.
 
