@@ -1,5 +1,6 @@
 """Tests for the echtvar subprocess wrapper."""
 
+import gzip
 import subprocess
 from collections.abc import Iterable
 from pathlib import Path
@@ -78,7 +79,10 @@ def _fake_echtvar(annotations: dict[tuple[str, int, str, str], str]):
             key = (cols[0].removeprefix("chr"), int(cols[1]), cols[3], cols[4])
             cols[7] = annotations.get(key, missing)
             lines.append("\t".join(cols))
-        output_vcf.write_text("\n".join(lines) + "\n")
+        # echtvar's anno always bgzips output regardless of extension; mirror
+        # that here so _parse_vcf's gzip.open path is what's exercised.
+        with gzip.open(output_vcf, "wt") as f:
+            f.write("\n".join(lines) + "\n")
         return subprocess.CompletedProcess(args=args, returncode=0, stdout="", stderr="")
 
     return fake_run

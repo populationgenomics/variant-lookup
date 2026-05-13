@@ -9,6 +9,7 @@ remap. ``annotate`` groups variants by chromosome, then dispatches one
 subprocess per chromosome in parallel, each against the matching archive.
 """
 
+import gzip
 import subprocess
 import tempfile
 from collections import defaultdict
@@ -68,17 +69,25 @@ def _write_vcf(path: Path, chrom: str, variants: Iterable[PseudoVCF]) -> None:
 
 
 def _parse_vcf(path: Path) -> dict[tuple[str, int, str, str], dict[str, str]]:
-    """Read an annotated VCF and return INFO field map keyed by (chrom, pos, ref, alt)."""
+    """Read an annotated VCF and return INFO field map keyed by (chrom, pos, ref, alt).
+
+    echtvar's `anno` always writes bgzipped output regardless of the filename's
+    extension — it calls rust_htslib's `Writer::from_path(path, header,
+    uncompressed=false, ...)`. bgzip is gzip-compatible at the stream level so
+    stdlib `gzip.open(..., "rt")` reads it transparently.
+    """
     out: dict[tuple[str, int, str, str], dict[str, str]] = {}
-    for line in path.read_text().splitlines():
-        if not line or line.startswith("#"):
-            continue
-        cols = line.split("\t")
-        chrom = cols[0].removeprefix("chr")
-        pos = int(cols[1])
-        ref, alt, info_field = cols[3], cols[4], cols[7]
-        info = dict(item.split("=", 1) for item in info_field.split(";") if "=" in item)
-        out[(chrom, pos, ref, alt)] = info
+    with gzip.open(path, "rt") as f:
+        for line in f:
+            line = line.rstrip("\n")
+            if not line or line.startswith("#"):
+                continue
+            cols = line.split("\t")
+            chrom = cols[0].removeprefix("chr")
+            pos = int(cols[1])
+            ref, alt, info_field = cols[3], cols[4], cols[7]
+            info = dict(item.split("=", 1) for item in info_field.split(";") if "=" in item)
+            out[(chrom, pos, ref, alt)] = info
     return out
 
 
