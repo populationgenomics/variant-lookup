@@ -20,7 +20,7 @@ def _post(client: TestClient, **kwargs: object) -> int:
     contacted on a successful auth."""
     return client.post(
         "/v1/variant",
-        json={"genome_build": "GRCh38", "id": "v1", "variant": "12345"},
+        json={"genome_build": "GRCh38", "variant": "12345"},
         **kwargs,  # type: ignore[arg-type]
     ).status_code
 
@@ -56,7 +56,7 @@ def test_valid_credentials_with_known_failing_input_returns_200() -> None:
     ):
         response = _client().post(
             "/v1/variant",
-            json={"genome_build": "GRCh38", "id": "v1", "gene": "SLC20A2", "variant": "12345"},
+            json={"genome_build": "GRCh38", "gene": "SLC20A2", "variant": "12345"},
             headers=headers,
         )
     assert response.status_code == 200

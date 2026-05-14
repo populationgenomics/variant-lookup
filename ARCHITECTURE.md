@@ -67,7 +67,6 @@ Request:
 
 ```json
 {
-  "id": "v1",
   "gene": "SLC20A2",
   "variant": "c.1240G>T"
 }
@@ -103,8 +102,6 @@ HTTP layer" below):
       "variantvalidator": 980, "echtvar": 80, "total": 2640
     }
   },
-  "id": "v1",
-  "input": {"id": "v1", "gene": "SLC20A2", "variant": "c.1240G>T"},
   "normalized": [
     {
       "pseudo_vcf": "8-42437272-C-A",

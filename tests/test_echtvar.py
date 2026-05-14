@@ -2,8 +2,9 @@
 
 import gzip
 import subprocess
-from collections.abc import Iterable
+from collections.abc import Callable, Iterable
 from pathlib import Path
+from typing import Any
 
 import pytest
 
@@ -56,7 +57,9 @@ def _make_archives(archives_dir: Path, chroms: Iterable[str]) -> None:
         (archives_dir / f"gnomad.joint.v4.1.chr{chrom}.echtvar.zip").write_bytes(b"")
 
 
-def _fake_echtvar(annotations: dict[tuple[str, int, str, str], str]):
+def _fake_echtvar(
+    annotations: dict[tuple[str, int, str, str], str],
+) -> Callable[..., subprocess.CompletedProcess[str]]:
     """Return a fake subprocess.run that mirrors echtvar's annotation behavior.
 
     The fake reads the input VCF, sets each row's INFO field from the provided
@@ -67,7 +70,7 @@ def _fake_echtvar(annotations: dict[tuple[str, int, str, str], str]):
         "gnomad_ac_xy=-1;gnomad_faf95_max=-1;gnomad_faf95_max_gen_anc=MISSING"
     )
 
-    def fake_run(args, **_kwargs):
+    def fake_run(args: list[str], **_kwargs: Any) -> subprocess.CompletedProcess[str]:
         input_vcf = Path(args[-2])
         output_vcf = Path(args[-1])
         lines = []
@@ -88,13 +91,15 @@ def _fake_echtvar(annotations: dict[tuple[str, int, str, str], str]):
     return fake_run
 
 
-def test_annotate_dispatches_per_chrom_sorted_by_pos(monkeypatch, tmp_path) -> None:
+def test_annotate_dispatches_per_chrom_sorted_by_pos(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
     """One subprocess call per chromosome, each receiving sorted-by-pos variants."""
     _make_archives(tmp_path, ("1", "10", "X"))
 
     calls: dict[str, list[int]] = {}
 
-    def capturing_run(args, **kwargs):
+    def capturing_run(args: list[str], **kwargs: Any) -> subprocess.CompletedProcess[str]:
         input_vcf = Path(args[-2])
         text = input_vcf.read_text()
         contig = next(line for line in text.splitlines() if line.startswith("##contig="))
@@ -120,7 +125,7 @@ def test_annotate_dispatches_per_chrom_sorted_by_pos(monkeypatch, tmp_path) -> N
     assert calls["X"] == [200]
 
 
-def test_annotate_preserves_request_order(monkeypatch, tmp_path) -> None:
+def test_annotate_preserves_request_order(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
     _make_archives(tmp_path, ("1", "10", "X"))
     monkeypatch.setattr("variant_lookup.echtvar.subprocess.run", _fake_echtvar({}))
     result = echtvar.annotate(
@@ -132,7 +137,9 @@ def test_annotate_preserves_request_order(monkeypatch, tmp_path) -> None:
     assert all(freq is None for freq in result)
 
 
-def test_annotate_returns_frequency_for_found_variant(monkeypatch, tmp_path) -> None:
+def test_annotate_returns_frequency_for_found_variant(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
     _make_archives(tmp_path, ("8",))
     annotations = {
         ("8", 42437272, "C", "A"): (
@@ -159,7 +166,9 @@ def test_annotate_returns_frequency_for_found_variant(monkeypatch, tmp_path) -> 
     assert freq.faf95_popmax_population == "nfe"
 
 
-def test_annotate_autosomal_homozygote_derives_zero_het(monkeypatch, tmp_path) -> None:
+def test_annotate_autosomal_homozygote_derives_zero_het(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
     """ac=2, hom=1 → het = 2 - 2*1 - 0 = 0."""
     _make_archives(tmp_path, ("8",))
     annotations = {
@@ -181,7 +190,9 @@ def test_annotate_autosomal_homozygote_derives_zero_het(monkeypatch, tmp_path) -
     assert freq.hemizygote_count == 0
 
 
-def test_annotate_chrx_nonpar_hemi_derives_zero_het(monkeypatch, tmp_path) -> None:
+def test_annotate_chrx_nonpar_hemi_derives_zero_het(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
     """ac=3 all on chrXY (hemi=3, hom=0) → het = 3 - 0 - 3 = 0."""
     _make_archives(tmp_path, ("X",))
     annotations = {
@@ -201,7 +212,7 @@ def test_annotate_chrx_nonpar_hemi_derives_zero_het(monkeypatch, tmp_path) -> No
     assert freq.heterozygote_count == 0
 
 
-def test_annotate_chrx_par_hemizygote_zero(monkeypatch, tmp_path) -> None:
+def test_annotate_chrx_par_hemizygote_zero(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
     _make_archives(tmp_path, ("X",))
     annotations = {
         ("X", 1_000_000, "A", "G"): "gnomad_ac=3;gnomad_an=100;gnomad_nhomalt=0;gnomad_ac_xy=3",
@@ -218,12 +229,14 @@ def test_annotate_chrx_par_hemizygote_zero(monkeypatch, tmp_path) -> None:
     assert non_par is not None and non_par.hemizygote_count == 3
 
 
-def test_annotate_skips_chrom_without_archive(monkeypatch, tmp_path) -> None:
+def test_annotate_skips_chrom_without_archive(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
     """A variant whose chromosome has no archive returns None (no subprocess call)."""
     _make_archives(tmp_path, ("1",))
     calls: list[list[str]] = []
 
-    def capturing_run(args, **kwargs):
+    def capturing_run(args: list[str], **kwargs: Any) -> subprocess.CompletedProcess[str]:
         calls.append(list(args))
         return _fake_echtvar({})(args, **kwargs)
 

@@ -21,6 +21,6 @@ def test_variant_requires_auth() -> None:
     client = TestClient(create_app())
     response = client.post(
         "/v1/variant",
-        json={"genome_build": "GRCh38", "id": "v1", "variant": "12345"},
+        json={"genome_build": "GRCh38", "variant": "12345"},
     )
     assert response.status_code == 401

@@ -94,10 +94,8 @@ curl -sS -k -H "Authorization: Bearer $TOKEN" "$HOST/readyz" | jq .
 curl -sS -k -X POST \
      -H "Authorization: Bearer $TOKEN" \
      -H 'Content-Type: application/json' \
-     -d '{"genome_build":"GRCh38","variants":[
-           {"id":"v1","gene":"SLC20A2","hgnc_id":11013,"variant":"NM_006749.5:c.1240G>T"}
-         ]}' \
-     "$HOST/v1/variants" | jq .
+     -d '{"variant":"NM_006749.5:c.1240G>T"}' \
+     "$HOST/v1/variant" | jq .
 ```
 
 ## License

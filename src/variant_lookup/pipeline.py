@@ -70,11 +70,11 @@ class Pipeline:
             try:
                 normalized_hgvs_strings = self._cleanup_and_normalize(variant, genome_build)
             except _PipelineError as e:
-                return self._error_response(variant, e)
+                return self._error_response(e)
 
             vv_results = self._resolve_via_vv(normalized_hgvs_strings)
             if isinstance(vv_results, _PipelineError):
-                return self._error_response(variant, vv_results)
+                return self._error_response(vv_results)
 
             normalized_variants = [
                 NormalizedVariant(
@@ -86,8 +86,6 @@ class Pipeline:
 
         return VariantResponse(
             meta=self._meta(),
-            id=variant.id,
-            input=variant,
             normalized=normalized_variants,
             error=None,
         )
@@ -210,11 +208,9 @@ class Pipeline:
             },
         )
 
-    def _error_response(self, variant: VariantInput, error: "_PipelineError") -> VariantResponse:
+    def _error_response(self, error: "_PipelineError") -> VariantResponse:
         return VariantResponse(
             meta=self._meta(),
-            id=variant.id,
-            input=variant,
             normalized=None,
             error=VariantError(code=error.code, upstream=error.upstream, message=error.message),
         )

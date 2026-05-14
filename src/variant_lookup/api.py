@@ -84,7 +84,7 @@ def create_app() -> FastAPI:
             mutalyzer_client=MutalyzerClient(settings.mutalyzer_base_url),
         )
         # Re-project to VariantInput (drop genome_build, which is per-request).
-        variant = VariantInput(id=request.id, variant=request.variant, gene=request.gene)
+        variant = VariantInput(variant=request.variant, gene=request.gene)
         return pipeline.process_one(variant, request.genome_build)
 
     @app.get(

@@ -4,7 +4,6 @@ from pydantic import BaseModel, Field
 
 
 class VariantInput(BaseModel):
-    id: str = Field(..., description="Caller-supplied identifier echoed back in the response.")
     variant: str = Field(..., description="HGVS-like description or `rs…` rsID.")
     gene: str | None = Field(
         None,
@@ -94,8 +93,6 @@ class VariantResponse(BaseModel):
     """Body shape returned by ``POST /v1/variant``."""
 
     meta: ResponseMeta
-    id: str
-    input: VariantInput
     normalized: list[NormalizedVariant] | None
     error: VariantError | None
 

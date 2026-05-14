@@ -101,7 +101,7 @@ def test_coding_variant_resolves_to_one_normalized(
     freq = _fake_freq()
     monkeypatch.setattr(echtvar, "annotate", lambda _, **__: [freq])
 
-    result = pipe.process_one(VariantInput(id="v1", gene="SLC20A2", variant="c.1240G>T"), "GRCh38")
+    result = pipe.process_one(VariantInput(gene="SLC20A2", variant="c.1240G>T"), "GRCh38")
 
     assert result.error is None
     assert result.normalized is not None
@@ -137,9 +137,7 @@ def test_protein_variant_fans_out_to_multiple_candidates(
     ]
     monkeypatch.setattr(echtvar, "annotate", lambda _, **__: [None, None])
 
-    result = pipe.process_one(
-        VariantInput(id="v1", gene="SLC20A2", variant="p.Glu414Ter"), "GRCh38"
-    )
+    result = pipe.process_one(VariantInput(gene="SLC20A2", variant="p.Glu414Ter"), "GRCh38")
 
     assert result.error is None
     assert result.normalized is not None
@@ -171,7 +169,7 @@ def test_rsid_input_routes_to_ncbi(
     )
     monkeypatch.setattr(echtvar, "annotate", lambda _, **__: [None])
 
-    result = pipe.process_one(VariantInput(id="v1", gene="SLC20A2", variant="rs12345"), "GRCh38")
+    result = pipe.process_one(VariantInput(gene="SLC20A2", variant="rs12345"), "GRCh38")
 
     assert result.error is None
     assert result.normalized is not None
@@ -183,7 +181,7 @@ def test_rsid_input_routes_to_ncbi(
 
 def test_cleanup_failure_produces_error_result(pipe: pipeline.Pipeline) -> None:
     # Unparseable input — no letters means cleanup rejects it
-    result = pipe.process_one(VariantInput(id="v1", gene="SLC20A2", variant="12345"), "GRCh38")
+    result = pipe.process_one(VariantInput(gene="SLC20A2", variant="12345"), "GRCh38")
     assert result.error is not None
     assert result.error.code == "VARIANT_CLEANUP_FAILED"
     assert result.normalized is None
@@ -197,7 +195,7 @@ def test_vv_failure_produces_error_result(
     mut_client.normalize.return_value = {"normalized_description": "NM_006749.5:c.1240G>T"}
     vv_client.mane_select.side_effect = VariantValidatorError("NO_GENOMIC_COORDS", "nope")
 
-    result = pipe.process_one(VariantInput(id="v1", gene="SLC20A2", variant="c.1240G>T"), "GRCh38")
+    result = pipe.process_one(VariantInput(gene="SLC20A2", variant="c.1240G>T"), "GRCh38")
     assert result.error is not None
     assert result.error.code == "NO_GENOMIC_COORDS"
     assert result.error.upstream == "variantvalidator"
@@ -209,7 +207,7 @@ def test_mutalyzer_normalize_failure_produces_error_result(
 ) -> None:
     mut_client.normalize.side_effect = MutalyzerError("EREF", "reference not found")
 
-    result = pipe.process_one(VariantInput(id="v1", gene="SLC20A2", variant="c.1240G>T"), "GRCh38")
+    result = pipe.process_one(VariantInput(gene="SLC20A2", variant="c.1240G>T"), "GRCh38")
     assert result.error is not None
     assert result.error.code == "NORMALIZATION_EREF"
     assert result.error.upstream == "mutalyzer"
@@ -220,7 +218,7 @@ def test_mutalyzer_normalize_failure_produces_error_result(
 
 def test_meta_block_populated_on_error(pipe: pipeline.Pipeline) -> None:
     """Even on an early-cleanup-failure path, meta + durations_ms are emitted."""
-    result = pipe.process_one(VariantInput(id="v1", gene="SLC20A2", variant="12345"), "GRCh38")
+    result = pipe.process_one(VariantInput(gene="SLC20A2", variant="12345"), "GRCh38")
     assert result.error is not None
     assert result.meta.reference == "GRCh38"
     assert result.meta.gnomad
@@ -252,7 +250,7 @@ def test_meta_durations_total_covers_per_stage(
     )
     monkeypatch.setattr(echtvar, "annotate", lambda _, **__: [_fake_freq()])
 
-    result = pipe.process_one(VariantInput(id="v1", gene="SLC20A2", variant="c.1240G>T"), "GRCh38")
+    result = pipe.process_one(VariantInput(gene="SLC20A2", variant="c.1240G>T"), "GRCh38")
     d = result.meta.durations_ms
     stage_sum = sum(
         d[k]
@@ -280,7 +278,9 @@ def test_fully_qualified_input_works_without_gene(
     )
     monkeypatch.setattr(echtvar, "annotate", lambda _, **__: [None])
 
-    result = pipe.process_one(VariantInput(id="v1", variant="NC_000016.10:g.2116896C>A"), "GRCh38")
+    result = pipe.process_one(
+        VariantInput(gene=None, variant="NC_000016.10:g.2116896C>A"), "GRCh38"
+    )
     assert result.error is None
     assert result.normalized is not None
     assert result.normalized[0].pseudo_vcf == "16-2116896-C-A"
@@ -290,7 +290,7 @@ def test_bare_variant_without_gene_fails_with_clear_message(
     pipe: pipeline.Pipeline,
 ) -> None:
     """Bare c.… with no gene and no RefSeq prefix must produce a clear error."""
-    result = pipe.process_one(VariantInput(id="v1", variant="c.1240G>T"), "GRCh38")
+    result = pipe.process_one(VariantInput(gene=None, variant="c.1240G>T"), "GRCh38")
     assert result.error is not None
     assert result.error.code == "VARIANT_CLEANUP_FAILED"
     # Message should mention what's missing, not include the literal "None".
