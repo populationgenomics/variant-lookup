@@ -35,10 +35,18 @@ class RefSeqIndex:
         self._by_gene: dict[str, GeneAccessions] = entries
         # Index versionless accession → versioned form, for autocomplete.
         self._by_unversioned: dict[str, str] = {}
+        # Index transcript / protein accession → owning gene entry, for
+        # back-resolving the chromosomal NC_ when the caller supplied a
+        # bare NM_/NP_ refseq without a gene symbol (intronic wrapping).
+        self._by_accession: dict[str, GeneAccessions] = {}
         for entry in entries.values():
             for acc in (entry.rna, entry.protein, entry.genomic):
-                if acc and "." in acc:
+                if not acc:
+                    continue
+                if "." in acc:
                     self._by_unversioned[acc.split(".", 1)[0]] = acc
+                self._by_accession[acc] = entry
+                self._by_accession[acc.split(".", 1)[0]] = entry
 
     @classmethod
     def from_file(cls, path: Path) -> "RefSeqIndex":
@@ -74,6 +82,17 @@ class RefSeqIndex:
         if "." in accession:
             return accession
         return self._by_unversioned.get(accession)
+
+    def genomic_for_accession(self, accession: str) -> str | None:
+        """Resolve a transcript or protein accession to its chromosomal NC_."""
+        entry = self._by_accession.get(accession)
+        if entry:
+            return entry.genomic
+        if "." in accession:
+            entry = self._by_accession.get(accession.split(".", 1)[0])
+            if entry:
+                return entry.genomic
+        return None
 
 
 def _str_or_none(value: object) -> str | None:

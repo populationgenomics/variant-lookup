@@ -83,8 +83,30 @@ class TestCleanHGVS:
         assert result.hgvs_desc == "p.Glu414Ter"
 
     def test_x_normalised_to_stop_codon(self, refseq_index: RefSeqIndex) -> None:
+        """``X`` → ``*`` then ``R`` → ``Arg`` (mutalyzer 3 demands 3-letter)."""
         result = clean("p.R191X", "PDGFB", "GRCh38", refseq_index)
-        assert result.hgvs_desc == "p.R191*"
+        assert result.hgvs_desc == "p.Arg191*"
+
+    def test_single_letter_aa_expanded(self, refseq_index: RefSeqIndex) -> None:
+        """Bare 1-letter substitution: ``p.R256H`` → ``p.Arg256His``."""
+        result = clean("p.R256H", "PDGFB", "GRCh38", refseq_index)
+        assert result.hgvs_desc == "p.Arg256His"
+
+    def test_single_letter_aa_in_range(self, refseq_index: RefSeqIndex) -> None:
+        """Range ``p.K59_N98del`` → ``p.Lys59_Asn98del``."""
+        result = clean("p.K59_N98del", "PDGFB", "GRCh38", refseq_index)
+        assert result.hgvs_desc == "p.Lys59_Asn98del"
+
+    def test_three_letter_aa_left_alone(self, refseq_index: RefSeqIndex) -> None:
+        """Already-3-letter codes (lowercase 2nd char) are not touched."""
+        result = clean("p.Arg63Cys", "PDGFB", "GRCh38", refseq_index)
+        assert result.hgvs_desc == "p.Arg63Cys"
+
+    def test_unknown_aa_letter_passes_through(self, refseq_index: RefSeqIndex) -> None:
+        """U (selenocysteine), B and similar non-standard letters are preserved."""
+        result = clean("p.U191Q", "PDGFB", "GRCh38", refseq_index)
+        # U has no 3-letter mapping in our table; Q expands.
+        assert result.hgvs_desc == "p.U191Gln"
 
     def test_three_letter_capitalization(self, refseq_index: RefSeqIndex) -> None:
         result = clean("p.arg191ter", "PDGFB", "GRCh38", refseq_index)
@@ -119,6 +141,32 @@ class TestCleanHGVS:
     def test_frameshift_normalisation(self, refseq_index: RefSeqIndex) -> None:
         result = clean("p.Arg100GlyfsTer5", "SLC20A2", "GRCh38", refseq_index)
         assert result.hgvs_desc.endswith("fs")
+
+    def test_intronic_splice_wrapped_with_genomic_ref(self, refseq_index: RefSeqIndex) -> None:
+        """``c.X+N`` / ``c.X-N`` need the chromosomal NC_ for Mutalyzer to resolve.
+
+        Per HGVS nomenclature, intronic positions in transcript coordinates
+        must be qualified with the genomic reference: ``NC_chr(NM_X):c.X+N``.
+        """
+        result = clean("c.1240+1G>T", "SLC20A2", "GRCh38", refseq_index)
+        assert result.refseq == "NC_000008.11(NM_006749.5)"
+        assert result.hgvs_desc == "c.1240+1G>T"
+
+    def test_intronic_wrapping_on_caller_supplied_nm(self, refseq_index: RefSeqIndex) -> None:
+        """Caller-supplied bare ``NM_:c.X-N`` is wrapped the same way."""
+        result = clean("NM_006749.5:c.1240-2A>G", None, "GRCh38", refseq_index)
+        assert result.refseq == "NC_000008.11(NM_006749.5)"
+        assert result.hgvs_desc == "c.1240-2A>G"
+
+    def test_non_intronic_not_wrapped(self, refseq_index: RefSeqIndex) -> None:
+        """A plain coding-change c.X>Y stays as a bare NM_."""
+        result = clean("NM_006749.5:c.1240G>T", None, "GRCh38", refseq_index)
+        assert result.refseq == "NM_006749.5"
+
+    def test_intronic_unknown_transcript_passes_through(self, refseq_index: RefSeqIndex) -> None:
+        """If the NM_ isn't in our index we can't wrap — leave it to upstream."""
+        result = clean("NM_999999.1:c.100+1G>T", None, "GRCh38", refseq_index)
+        assert result.refseq == "NM_999999.1"
 
 
 class TestCleanRejects:

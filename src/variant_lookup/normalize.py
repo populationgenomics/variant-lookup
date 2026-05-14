@@ -181,6 +181,37 @@ def _ensure_versioned(refseq: str, refseq_index: RefSeqIndex) -> str:
     return versioned if versioned else refseq
 
 
+def _maybe_wrap_intronic(refseq: str, hgvs_desc: str, refseq_index: RefSeqIndex) -> str:
+    """Wrap a bare ``NM_`` refseq with its chromosomal context for intronic variants.
+
+    Mutalyzer can't resolve splice-site positions (``c.X+N`` / ``c.X-N``)
+    against a transcript alone — it needs the surrounding genomic
+    sequence. HGVS nomenclature spells this as ``NC_chr(NM_X):c.…``.
+    See https://hgvs-nomenclature.org/stable/background/refseq/.
+    """
+    if not refseq.startswith("NM_"):
+        return refseq
+    if "+" not in hgvs_desc and "-" not in hgvs_desc:
+        return refseq
+    genomic = refseq_index.genomic_for_accession(refseq)
+    return f"{genomic}({refseq})" if genomic else refseq
+
+
+def _expand_single_letter_aa(text: str) -> str:
+    # Coding (c.) notation also has digit-then-letter patterns (alt base in
+    # c.1240G>T), so this transform must only run on protein descriptions.
+    if not text.startswith("p."):
+        return text
+
+    def _swap(match: re.Match[str]) -> str:
+        return match.group(1) + _PROTEIN_LETTERS_1TO3.get(match.group(2), match.group(2))
+
+    text = re.sub(r"(p\.\(?)([A-Z])(?=\d)", _swap, text)
+    text = re.sub(r"(_)([A-Z])(?=\d)", _swap, text)
+    text = re.sub(r"(\d)([A-Z])(?![a-z])", _swap, text)
+    return text
+
+
 def _cleanup_hgvs_desc(text: str, is_chromosomal: bool) -> str:
     """Apply per-variant-string heuristics that produce HGVS-shaped output."""
     text = text.replace("(", "").replace(")", "").replace("[", "").replace("]", "")
@@ -204,6 +235,16 @@ def _cleanup_hgvs_desc(text: str, is_chromosomal: bool) -> str:
 
     # c.{ref}{pos}{alt} → c.{pos}{ref}>{alt}
     text = re.sub(r"c\.([ACTG])(\d+)([A-Z]+)", r"c.\2\1>\3", text)
+
+    # Single-letter aa codes → three-letter form. Mutalyzer 3 enforces the
+    # HGVS three-letter spec, so ``NP_…:p.R4344Q`` shapes 422 upstream. A
+    # standalone uppercase letter (one that can't be part of a three-letter
+    # token, whose 2nd char is always lowercase) is unambiguously a
+    # single-letter aa in three slots: leading ref (``p.R…``), range second
+    # ref (``…_K…``), and alt (``…1Q`` not followed by lowercase). Unknown
+    # letters (X, U, B) pass through; the stop-codon glyph normalisation
+    # above already mapped X → * for the alt slot.
+    text = _expand_single_letter_aa(text)
 
     # Capitalize three-letter p. amino-acid codes.
     if "del" not in text:
@@ -284,5 +325,7 @@ def clean(
         refseq = predicted
     else:
         refseq = _ensure_versioned(refseq, refseq_index)
+
+    refseq = _maybe_wrap_intronic(refseq, hgvs_desc, refseq_index)
 
     return CleanedVariant(refseq=refseq, hgvs_desc=hgvs_desc)
