@@ -37,16 +37,29 @@ def download_gff(target: Path) -> None:
 
 
 def process_gff(gff_path: Path) -> dict[str, dict[str, Any]]:
-    """Extract MANE-Select / RefSeq-Select transcript + protein + genomic accessions."""
-    refseqs: dict[str, dict[str, Any]] = {}
+    """Extract MANE-Select / RefSeq-Select transcript + protein + genomic accessions.
+
+    Two-pass: collect CDS and mRNA lines first, then process proteins
+    before transcripts. A single in-order pass loses every transcript —
+    in GFF3 the mRNA feature for each gene precedes its CDS, so
+    ``_record_transcript`` would skip on ``gene not in refseqs`` for
+    everything.
+    """
+    protein_lines: list[str] = []
+    transcript_lines: list[str] = []
     with gzip.open(gff_path, "rt") as f:
         for line in f:
             if not re.search(r"(MANE|RefSeq) Select", line):
                 continue
             if re.search(r"BestRefSeq\s+CDS", line):
-                _record_protein(line, refseqs)
+                protein_lines.append(line)
             elif re.search(r"BestRefSeq\s+mRNA", line):
-                _record_transcript(line, refseqs)
+                transcript_lines.append(line)
+    refseqs: dict[str, dict[str, Any]] = {}
+    for line in protein_lines:
+        _record_protein(line, refseqs)
+    for line in transcript_lines:
+        _record_transcript(line, refseqs)
     return refseqs
 
 
