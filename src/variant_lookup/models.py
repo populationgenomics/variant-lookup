@@ -24,9 +24,15 @@ class VariantRequest(VariantInput):
     rather than per-variant — placed at the body root for ergonomics.
     """
 
-    genome_build: str = Field(
-        ...,
-        description="GRCh38 or GRCh37 (latter is projected to GRCh38 via VV).",
+    genome_build: str | None = Field(
+        None,
+        description=(
+            "GRCh37 or GRCh38 (or ``hg19`` / ``hg38`` aliases). Required only "
+            "when ``variant`` is a chromosomal refseq (e.g. ``chr17:g.…``); "
+            "ignored for inputs with fully-qualified RefSeq accessions "
+            "(``NM_…``, ``NP_…``, ``NC_…``) or rsIDs (latter is projected to "
+            "GRCh38 via VV)."
+        ),
     )
 
 

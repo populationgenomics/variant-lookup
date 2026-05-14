@@ -54,3 +54,46 @@ def test_e2e_coding_variant_returns_normalized_with_frequency() -> None:
     # meta + durations still emitted in single-variant shape
     assert body["meta"]["reference"] == "GRCh38"
     assert "durations_ms" in body["meta"]
+
+
+def test_coding_variant_without_genome_build_succeeds() -> None:
+    """genome_build is only required for chromosomal refseqs; coding inputs
+    work without it. Mirrors the palit caller which omits the field for
+    papers whose extraction reports the build as 'unknown'."""
+    fake_freq = Frequency(
+        ac=5,
+        an=1614174,
+        homozygote_count=0,
+        heterozygote_count=5,
+        hemizygote_count=0,
+        faf95_popmax=None,
+        faf95_popmax_population=None,
+    )
+    fake_vv = VVResult(
+        pseudo_vcf="8-42437272-C-A",
+        hgvs_c="NM_006749.5:c.1240G>T",
+        hgvs_p="NP_006740.1:p.Glu414Ter",
+    )
+
+    with (
+        patch("variant_lookup.api.VariantValidatorClient") as VVC,
+        patch("variant_lookup.api.MutalyzerClient") as MC,
+        patch("variant_lookup.pipeline.echtvar.annotate", return_value=[fake_freq]),
+    ):
+        VVC.return_value.mane_select.return_value = fake_vv
+        MC.return_value.normalize.return_value = {"normalized_description": "NM_006749.5:c.1240G>T"}
+        client = TestClient(create_app())
+        response = client.post(
+            "/v1/variant",
+            json={
+                "id": "v1",
+                "gene": "SLC20A2",
+                "variant": "NM_006749.5:c.1240G>T",
+            },
+            headers={"Authorization": f"Bearer {TEST_BEARER}"},
+        )
+
+    assert response.status_code == 200
+    body = response.json()
+    assert body["error"] is None
+    assert body["normalized"][0]["pseudo_vcf"] == "8-42437272-C-A"

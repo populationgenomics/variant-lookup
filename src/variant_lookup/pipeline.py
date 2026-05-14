@@ -65,7 +65,7 @@ class Pipeline:
         default_factory=lambda: defaultdict(int), init=False, repr=False, compare=False
     )
 
-    def process_one(self, variant: VariantInput, genome_build: str) -> VariantResponse:
+    def process_one(self, variant: VariantInput, genome_build: str | None) -> VariantResponse:
         with self._timed("total"):
             try:
                 normalized_hgvs_strings = self._cleanup_and_normalize(variant, genome_build)
@@ -120,7 +120,7 @@ class Pipeline:
         )
         return _PipelineError("NO_GENOMIC_COORDS", message, upstream="variantvalidator")
 
-    def _cleanup_and_normalize(self, variant: VariantInput, genome_build: str) -> list[str]:
+    def _cleanup_and_normalize(self, variant: VariantInput, genome_build: str | None) -> list[str]:
         """Apply rsID lookup / text cleanup / Mutalyzer normalization / back-translation."""
         cleaned = self._to_cleaned_variant(variant, genome_build)
         with self._timed("normalize"):
@@ -146,7 +146,7 @@ class Pipeline:
                 ) from e
 
     def _to_cleaned_variant(
-        self, variant: VariantInput, genome_build: str
+        self, variant: VariantInput, genome_build: str | None
     ) -> normalize.CleanedVariant:
         rsid = normalize.extract_rsid(variant.variant)
         if rsid:

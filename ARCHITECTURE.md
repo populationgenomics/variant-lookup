@@ -67,7 +67,6 @@ Request:
 
 ```json
 {
-  "genome_build": "GRCh38",
   "id": "v1",
   "gene": "SLC20A2",
   "variant": "c.1240G>T"
@@ -78,6 +77,13 @@ Request:
 `GENE:c.…`). It's optional when `variant` is fully qualified (`NC_…:g.…`,
 `NM_…:c.…`, `NP_…:p.…`) or an rsID — there's enough information in the
 string itself.
+
+`genome_build` (optional, e.g. `"GRCh38"` / `"GRCh37"` / aliases
+`"hg19"` / `"hg38"`) is only consulted for chromosomal refseqs like
+`chr17:g.43045606C>G`. For inputs with fully-qualified RefSeq
+accessions or rsIDs it's ignored, so callers can omit it. When a
+chromosomal input is submitted without `genome_build`, the response
+carries `error.code = "VARIANT_CLEANUP_FAILED"`.
 
 Response (always 200 unless the request itself is malformed, auth fails, the
 service is broken, or the in-flight cap is exceeded — see "Errors at the
