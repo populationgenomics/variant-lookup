@@ -152,7 +152,15 @@ FastAPI-generated. Behind the same API-key auth as everything else.
 
 ### Auth
 
-`Authorization: Bearer <api-key>`. Keys are random high-entropy tokens. The server stores **argon2id hashes** (per-key salt embedded in the hash string) in a config file mounted from outside the container. Reload requires a service restart. No account management, no JWT issuance — adding/revoking a key is editing the file. No rate limiting in v1.
+`Authorization: Bearer <api-key>`. Keys are random high-entropy tokens. The server stores **argon2id hashes** (per-key salt embedded in the hash string) in a config file mounted from outside the container. Reload requires a service restart. No account management, no JWT issuance — adding/revoking a key is editing the file.
+
+### Concurrency + rate limit
+
+The gateway runs **multiple uvicorn workers** (separate Python processes; `UVICORN_WORKERS` env var, default 4). Each worker accepts HTTP requests independently, so callers parallelise by issuing concurrent requests.
+
+`/v1/variant` is additionally bounded by an **nginx `limit_conn` cap of 8 concurrent in-flight requests cluster-wide** (not per-IP — `nginx.conf` `map`s the key to a constant `"global"`). When the cap is exceeded, nginx returns **`429` with `Retry-After: 1`**. Passthroughs (`/mutalyzer/*`, `/variantvalidator/*`, `/echtvar/frequencies`) and probes (`/healthz`, `/readyz`) are not gated — only the main endpoint.
+
+The cap is calibrated around the downstream bottleneck: mutalyzer-api processes one `/api/normalize` call per worker at a time (GIL-held), with ~1.6 s steady-state CPU per call. With the default 4 mutalyzer-api workers, sustained throughput is ~2.5 req/s; cluster-wide in-flight of 8 corresponds to ~3 s worst-case queue wait. Raise the value in `nginx.conf` if a larger queue tolerance is acceptable.
 
 ### Errors at the HTTP layer
 

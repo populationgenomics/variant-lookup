@@ -2,21 +2,6 @@
 
 FROM python:3.13-slim AS builder
 
-# `description-extractor` (transitive via `mutalyzer`) has no published wheel.
-# Its sdist's setup.py shells out to `git clone https://github.com/mutalyzer/
-# extractor-core.git` from a custom build_ext, then compiles a C++17 extension
-# against those sources. python:3.13-slim has neither git nor a C++ toolchain,
-# so we install them here. The builder stage is discarded — none of this ends
-# up in the runtime image.
-# Caveat: this also means each build pulls `master` HEAD of extractor-core;
-# the build is non-reproducible by upstream's design and needs network egress
-# to github.com.
-RUN set -eu \
-    && apt-get update \
-    && apt-get install -y --no-install-recommends \
-       git ca-certificates build-essential \
-    && rm -rf /var/lib/apt/lists/*
-
 RUN pip install --no-cache-dir uv
 
 WORKDIR /build
@@ -52,18 +37,17 @@ WORKDIR /app
 COPY --from=builder /build/.venv /app/.venv
 COPY --from=builder /build/src /app/src
 
-# We deliberately leave USER unset (i.e. root). Bind-mounted reference data
-# under /data is owned by the host operator with group-only perms (mode 0770),
-# and matching the host UID inside the container would require per-deployment
-# .env wiring. Root reads any UID/GID via the bind mount, so we sidestep that.
-# The only writable path is /data/mutalyzer, which our compose backs with a
-# docker-managed named volume — root-owned files there live inside docker's
-# volume store, not on the host bind mount surface, so there's no host-side
-# ownership cleanup to do later.
+# We deliberately leave USER unset (i.e. root). All reference data under /data
+# is bind-mounted from the host (echtvar archives, refseq index, mutalyzer
+# cache). Matching the host UID inside the container would require
+# per-deployment .env wiring; root reads any UID/GID via the bind mount, so we
+# sidestep that. Writes to /data/mutalyzer/cache only happen during cache
+# population — the runtime gateway holds no writable bind mounts.
 
 ENV PATH="/app/.venv/bin:$PATH" \
     PYTHONPATH="/app/src" \
-    PYTHONUNBUFFERED=1
+    PYTHONUNBUFFERED=1 \
+    UVICORN_WORKERS=4
 
 EXPOSE 8000
 
@@ -75,4 +59,7 @@ EXPOSE 8000
 # /bin/python is a symlink to /usr/local/bin/python3 which exists, and
 # Python detects the venv from the adjacent pyvenv.cfg so site-packages
 # is the venv's.
-CMD ["/app/.venv/bin/python", "-m", "uvicorn", "variant_lookup.main:app", "--host", "0.0.0.0", "--port", "8000"]
+#
+# Wrapped in `sh -c` so $UVICORN_WORKERS expands at container start, letting
+# operators override via compose env without rebuilding the image.
+CMD ["sh", "-c", "exec /app/.venv/bin/python -m uvicorn variant_lookup.main:app --host 0.0.0.0 --port 8000 --workers ${UVICORN_WORKERS:-4}"]

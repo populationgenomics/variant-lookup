@@ -50,6 +50,7 @@ services:
       NCBI_EUTILS_API_KEY: ${NCBI_EUTILS_API_KEY:-}
       SERVICE_VERSION: ${SERVICE_VERSION:-0.1.0+dev}
       GNOMAD_VERSION: ${GNOMAD_VERSION:-4.1}
+      UVICORN_WORKERS: ${UVICORN_WORKERS:-4}
     volumes:
       - ${DATA_DIR}/echtvar:/data/echtvar:ro
       - ${DATA_DIR}/refseq:/data/refseq:ro
