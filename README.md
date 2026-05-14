@@ -6,6 +6,59 @@ Replaces the chain of rate-limited / unreliable external services (Mutalyzer, Va
 
 See **[ARCHITECTURE.md](ARCHITECTURE.md)** for the system design, the public API contract, the configuration surface, and the AGPL boundary that future contributors must respect.
 
+## Example
+
+Given a genomic coordinate, the service walks it through Mutalyzer and VariantValidator to canonicalise the HGVS triple, then looks up the gnomAD v4 frequency:
+
+```bash
+curl -sS -k -X POST \
+     -H "Authorization: Bearer <your-token>" \
+     -H 'Content-Type: application/json' \
+     -d '{"variant":"NC_000016.10:g.2116896C>A"}' \
+     "https://<your-host>:9443/v1/variant" | jq
+```
+
+```json
+{
+  "meta": {
+    "service": "0.1.0+dev",
+    "reference": "GRCh38",
+    "gnomad": "4.1",
+    "variantvalidator": "3.0.2.dev235+ge5bb05951",
+    "mutalyzer": "3.1.1",
+    "timestamp": "2026-05-14T02:15:19.901260+00:00",
+    "durations_ms": {
+      "cleanup": 0,
+      "rsid": 0,
+      "normalize": 1851,
+      "back_translate": 0,
+      "variantvalidator": 970,
+      "echtvar": 181,
+      "total": 3002
+    }
+  },
+  "normalized": [
+    {
+      "pseudo_vcf": "16-2116896-C-A",
+      "hgvs_c": "NM_001009944.3:c.1543G>T",
+      "hgvs_p": "NP_001009944.3:p.Gly515Trp",
+      "frequency": {
+        "ac": 1,
+        "an": 1527530,
+        "homozygote_count": 0,
+        "heterozygote_count": 1,
+        "hemizygote_count": 0,
+        "faf95_popmax": null,
+        "faf95_popmax_population": null
+      }
+    }
+  ],
+  "error": null
+}
+```
+
+Any fully-qualified input works on its own — genomic (`NC_…:g.…`), coding (`NM_…:c.…`), protein (`NP_…:p.…`), or rsID (`rs28934578`). Unqualified shorthand (bare `c.…` / `p.…` or `GENE:c.…`) requires a `gene` field alongside `variant`. `normalized` is a list because protein-level inputs can back-translate to multiple coding variants; the other shapes resolve to a single entry. See [ARCHITECTURE.md § "Public API"](ARCHITECTURE.md#public-api) for the full schema, error codes, and retriable-vs-terminal failure semantics.
+
 ## Local development
 
 Requires Python 3.13, a C++17 compiler, `git`, and [uv](https://docs.astral.sh/uv/). `description-extractor`'s sdist (a transitive Mutalyzer dep) clones a sibling repo at build time and compiles a C++17 extension — `gcc 7+` / `clang 5+` is enough.
@@ -88,15 +141,11 @@ First boot waits **~30 min** on PostgreSQL (UTA) initialization inside the VV st
 TOKEN='<name>.<secret>'
 HOST='https://<your-host>:9443'
 
-curl -sS -k "$HOST/healthz"
-curl -sS -k -H "Authorization: Bearer $TOKEN" "$HOST/readyz" | jq .
-
-curl -sS -k -X POST \
-     -H "Authorization: Bearer $TOKEN" \
-     -H 'Content-Type: application/json' \
-     -d '{"variant":"NM_006749.5:c.1240G>T"}' \
-     "$HOST/v1/variant" | jq .
+curl -sS -k "$HOST/healthz"                                           # gateway up
+curl -sS -k -H "Authorization: Bearer $TOKEN" "$HOST/readyz" | jq .   # upstreams up
 ```
+
+Once both probes are green, run the variant lookup from the [Example](#example) above end-to-end to confirm the full pipeline works.
 
 ## License
 
