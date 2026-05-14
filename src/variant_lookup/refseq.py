@@ -83,15 +83,26 @@ class RefSeqIndex:
             return accession
         return self._by_unversioned.get(accession)
 
-    def genomic_for_accession(self, accession: str) -> str | None:
-        """Resolve a transcript or protein accession to its chromosomal NC_."""
+    def mane_version_for_accession(self, accession: str) -> str | None:
+        """Return the MANE-Select version for an accession's base id.
+
+        Accepts versioned (``NM_006749.1``) or versionless (``NM_006749``);
+        always returns the version currently in the MANE index, or ``None``
+        if the base isn't in our index. Used to silently substitute stale
+        caller-supplied versions — mutalyzer's and VV's reference data
+        only annotate the current MANE version, so older versions fail
+        with ``ENOSELECTORFOUND`` (mutalyzer) or "no GRCh38 coords" (VV).
+        """
+        base = accession.split(".", 1)[0]
+        return self._by_unversioned.get(base)
+
+    def entry_for_accession(self, accession: str) -> GeneAccessions | None:
+        """Return the owning gene's MANE-index entry for a transcript/protein/genomic accession."""
         entry = self._by_accession.get(accession)
         if entry:
-            return entry.genomic
+            return entry
         if "." in accession:
-            entry = self._by_accession.get(accession.split(".", 1)[0])
-            if entry:
-                return entry.genomic
+            return self._by_accession.get(accession.split(".", 1)[0])
         return None
 
 

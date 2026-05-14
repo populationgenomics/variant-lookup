@@ -60,6 +60,27 @@ def test_versioned_accession_unknown() -> None:
     assert idx.versioned_accession("NM_999999") is None
 
 
+def test_mane_version_promotes_stale_caller_version() -> None:
+    """Caller-supplied old version → current MANE version (silent substitution)."""
+    idx = _index()
+    assert idx.mane_version_for_accession("NM_006749.1") == "NM_006749.5"
+    assert idx.mane_version_for_accession("NM_006749") == "NM_006749.5"
+    # Already MANE: passthrough.
+    assert idx.mane_version_for_accession("NM_006749.5") == "NM_006749.5"
+    # Not in index: None (caller's value preserved upstream).
+    assert idx.mane_version_for_accession("NM_999999.1") is None
+
+
+def test_entry_for_accession_handles_version_drift() -> None:
+    """Entry lookup tolerates a non-MANE version of an indexed base."""
+    idx = _index()
+    entry = idx.entry_for_accession("NM_006749.1")  # old version
+    assert entry is not None and entry.symbol == "SLC20A2"
+    entry = idx.entry_for_accession("NP_006740.1")  # protein
+    assert entry is not None and entry.symbol == "SLC20A2"
+    assert idx.entry_for_accession("NM_999999.1") is None
+
+
 def test_from_file_round_trip(tmp_path: Path) -> None:
     raw = {
         "SLC20A2": {

@@ -108,7 +108,9 @@ class Pipeline:
         for candidate in candidates:
             with self._timed("variantvalidator"):
                 try:
-                    vv_results.append(self.vv_client.mane_select(_strip_parens(candidate)))
+                    vv_results.append(
+                        self.vv_client.mane_select(_strip_uncertainty_parens(candidate))
+                    )
                 except VariantValidatorError as e:
                     errors.append(e)
         if vv_results:
@@ -242,7 +244,17 @@ class _PipelineError(Exception):
         super().__init__(f"{code}: {message}")
 
 
-def _strip_parens(hgvs: str) -> str:
-    """Mutalyzer's back-translate output sometimes carries uncertainty parens;
-    VV rejects them."""
-    return hgvs.replace("(", "").replace(")", "")
+def _strip_uncertainty_parens(hgvs: str) -> str:
+    """Strip uncertainty parens (``c.(127G>T)``) from the *description* side.
+
+    Mutalyzer's back-translate output sometimes carries uncertainty parens
+    around the change; VV rejects them. But parens are also load-bearing
+    on the *refseq* side for intronic-wrapped descriptions like
+    ``NC_chr(NM_X):c.…+N`` — stripping those mangles the refseq into
+    ``NC_chrNM_X`` which VV can't parse. Only touch the part after the
+    first ``:``.
+    """
+    if ":" not in hgvs:
+        return hgvs.replace("(", "").replace(")", "")
+    refseq, desc = hgvs.split(":", 1)
+    return f"{refseq}:{desc.replace('(', '').replace(')', '')}"

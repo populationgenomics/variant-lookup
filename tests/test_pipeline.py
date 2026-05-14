@@ -202,6 +202,50 @@ def test_vv_failure_produces_error_result(
     assert result.error.upstream == "variantvalidator"
 
 
+def test_intronic_wrap_survives_to_vv(
+    pipe: pipeline.Pipeline,
+    vv_client: MagicMock,
+    mut_client: MagicMock,
+) -> None:
+    """The refseq-side parens of an intronic-wrapped HGVS must not be
+    stripped by the pipeline's uncertainty-paren cleanup. VV needs to
+    see ``NC_X(NM_Y):c.…+N`` intact."""
+    wrapped = "NC_000008.11(NM_006749.5):c.1240+1G>T"
+    mut_client.normalize.return_value = {"normalized_description": wrapped}
+    vv_client.mane_select.return_value = VVResult(
+        pseudo_vcf="8-42437272-G-A",
+        hgvs_c="NM_006749.5:c.1240+1G>T",
+        hgvs_p="NP_006740.1:p.?",
+    )
+
+    pipe.process_one(VariantInput(gene="SLC20A2", variant="c.1240+1G>T"), "GRCh38")
+
+    # The pipeline must have called VV with the refseq parens intact —
+    # not the mangled `NC_000008.11NM_006749.5:c.1240+1G>T`.
+    (call_args,) = vv_client.mane_select.call_args_list
+    assert call_args.args[0] == wrapped
+
+
+def test_uncertainty_parens_on_desc_still_stripped(
+    pipe: pipeline.Pipeline,
+    vv_client: MagicMock,
+    mut_client: MagicMock,
+) -> None:
+    """``c.(127G>T)`` uncertainty parens are still stripped before VV."""
+    mut_client.normalize.return_value = {"normalized_description": "NP_006740.1:p.Glu414Ter"}
+    mut_client.back_translate.return_value = ["NM_006749.5:c.(1240G>T)"]
+    vv_client.mane_select.return_value = VVResult(
+        pseudo_vcf="8-42437272-G-T",
+        hgvs_c="NM_006749.5:c.1240G>T",
+        hgvs_p="NP_006740.1:p.Glu414Ter",
+    )
+
+    pipe.process_one(VariantInput(gene="SLC20A2", variant="p.Glu414Ter"), "GRCh38")
+
+    (call_args,) = vv_client.mane_select.call_args_list
+    assert call_args.args[0] == "NM_006749.5:c.1240G>T"  # parens gone
+
+
 def test_vv_timeout_surfaces_as_retriable_code(
     pipe: pipeline.Pipeline,
     vv_client: MagicMock,

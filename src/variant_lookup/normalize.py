@@ -174,11 +174,25 @@ def _predict_refseq(
     return None
 
 
-def _ensure_versioned(refseq: str, refseq_index: RefSeqIndex) -> str:
-    if "." in refseq:
+def _ensure_mane_version(refseq: str, refseq_index: RefSeqIndex) -> str:
+    """Promote a transcript/protein accession to its MANE-Select version.
+
+    Self-hosted ``mutalyzer-api`` and VV's UTA only annotate the current
+    MANE-Select version of each base accession. Older versions 422
+    (``ENOSELECTORFOUND`` from mutalyzer) or come back from VV with no
+    GRCh38 coords. Silent substitution is safe: ``c.`` / ``p.`` numbering
+    is stable across NM_/NP_ versions for the same base accession in the
+    vast majority of cases, and the response's ``hgvs_c`` / ``hgvs_p``
+    is already on the MANE transcript anyway (VV's ``/mane_select``).
+
+    Skips chromosomal ``NC_`` accessions — their version *is* the genome
+    build (``.10`` vs ``.11`` = GRCh37 vs GRCh38), so substituting would
+    silently change the build.
+    """
+    if not refseq.startswith(("NM_", "NP_")):
         return refseq
-    versioned = refseq_index.versioned_accession(refseq)
-    return versioned if versioned else refseq
+    mane = refseq_index.mane_version_for_accession(refseq)
+    return mane if mane else refseq
 
 
 def _maybe_wrap_intronic(refseq: str, hgvs_desc: str, refseq_index: RefSeqIndex) -> str:
@@ -188,13 +202,21 @@ def _maybe_wrap_intronic(refseq: str, hgvs_desc: str, refseq_index: RefSeqIndex)
     against a transcript alone — it needs the surrounding genomic
     sequence. HGVS nomenclature spells this as ``NC_chr(NM_X):c.…``.
     See https://hgvs-nomenclature.org/stable/background/refseq/.
+
+    Always uses the MANE-Select transcript version inside the wrap, even
+    if the caller-supplied ``refseq`` slipped through as a non-MANE
+    version — mutalyzer's annotations on the NC_ only reference the
+    MANE selector, so a stale version inside the wrap 422s with
+    ``ENOSELECTORFOUND``.
     """
     if not refseq.startswith("NM_"):
         return refseq
     if "+" not in hgvs_desc and "-" not in hgvs_desc:
         return refseq
-    genomic = refseq_index.genomic_for_accession(refseq)
-    return f"{genomic}({refseq})" if genomic else refseq
+    entry = refseq_index.entry_for_accession(refseq)
+    if not entry or not entry.genomic or not entry.rna:
+        return refseq
+    return f"{entry.genomic}({entry.rna})"
 
 
 def _expand_single_letter_aa(text: str) -> str:
@@ -324,7 +346,7 @@ def clean(
             )
         refseq = predicted
     else:
-        refseq = _ensure_versioned(refseq, refseq_index)
+        refseq = _ensure_mane_version(refseq, refseq_index)
 
     refseq = _maybe_wrap_intronic(refseq, hgvs_desc, refseq_index)
 

@@ -120,6 +120,17 @@ class TestCleanHGVS:
         result = clean("NM_006749:c.1240G>T", "SLC20A2", "GRCh38", refseq_index)
         assert result.refseq == "NM_006749.5"
 
+    def test_stale_refseq_version_promoted_to_mane(self, refseq_index: RefSeqIndex) -> None:
+        """Old NM_ version (same base as MANE) → MANE version, to avoid
+        upstream `ENOSELECTORFOUND` / VV "no GRCh38 coords"."""
+        result = clean("NM_006749.1:c.1240G>T", "SLC20A2", "GRCh38", refseq_index)
+        assert result.refseq == "NM_006749.5"
+
+    def test_refseq_not_in_index_preserved(self, refseq_index: RefSeqIndex) -> None:
+        """Accession whose base isn't in the MANE index is left alone."""
+        result = clean("NM_001257180.2:c.1240G>T", "SLC20A2", "GRCh38", refseq_index)
+        assert result.refseq == "NM_001257180.2"
+
     def test_chromosomal_resolves_to_nc_accession(self, refseq_index: RefSeqIndex) -> None:
         result = clean("chr8:g.42437272C>A", "SLC20A2", "GRCh38", refseq_index)
         assert result.refseq == "NC_000008.11"
@@ -157,6 +168,13 @@ class TestCleanHGVS:
         result = clean("NM_006749.5:c.1240-2A>G", None, "GRCh38", refseq_index)
         assert result.refseq == "NC_000008.11(NM_006749.5)"
         assert result.hgvs_desc == "c.1240-2A>G"
+
+    def test_intronic_wrap_substitutes_mane_version(self, refseq_index: RefSeqIndex) -> None:
+        """Wrap always uses the MANE rna — a stale caller-supplied version
+        would 422 ENOSELECTORFOUND from mutalyzer (its NC_ annotations
+        only reference the current MANE selector)."""
+        result = clean("NM_006749.1:c.1240-2A>G", None, "GRCh38", refseq_index)
+        assert result.refseq == "NC_000008.11(NM_006749.5)"
 
     def test_non_intronic_not_wrapped(self, refseq_index: RefSeqIndex) -> None:
         """A plain coding-change c.X>Y stays as a bare NM_."""
