@@ -56,6 +56,8 @@ def resolve_rsid(
     try:
         response = httpx.get(_EUTILS_URL, params=params, timeout=timeout)
         response.raise_for_status()
+    except httpx.TimeoutException as e:
+        raise NCBIError("UPSTREAM_TIMEOUT", str(e)) from e
     except httpx.HTTPError as e:
         raise NCBIError("UPSTREAM_ERROR", str(e)) from e
 

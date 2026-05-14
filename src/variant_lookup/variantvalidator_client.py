@@ -28,7 +28,12 @@ class VVResult:
 class VariantValidatorClient:
     """Synchronous client for the sibling VV REST service."""
 
-    def __init__(self, base_url: str, *, timeout: float = 30.0) -> None:
+    def __init__(self, base_url: str, *, timeout: float = 90.0) -> None:
+        # 90 s covers cold UTA + SeqRepo lookups on large transcripts
+        # (ALMS1 NM_015120.4, GAA NM_000158.4, TTN). nginx caps the chain
+        # at 300 s (see nginx.conf), and the upstream mutalyzer call —
+        # which precedes us — caps at 150 s, leaving ample headroom for
+        # the two sequential cold paths in one request.
         self._base_url = base_url.rstrip("/")
         self._timeout = timeout
 
@@ -47,6 +52,8 @@ class VariantValidatorClient:
         try:
             response = httpx.get(url, timeout=self._timeout)
             response.raise_for_status()
+        except httpx.TimeoutException as e:
+            raise VariantValidatorError("UPSTREAM_TIMEOUT", str(e)) from e
         except httpx.HTTPError as e:
             raise VariantValidatorError("UPSTREAM_ERROR", str(e)) from e
 

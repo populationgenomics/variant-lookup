@@ -201,6 +201,52 @@ def test_vv_failure_produces_error_result(
     assert result.error.upstream == "variantvalidator"
 
 
+def test_vv_timeout_surfaces_as_retriable_code(
+    pipe: pipeline.Pipeline,
+    vv_client: MagicMock,
+    mut_client: MagicMock,
+) -> None:
+    """VV cold-cache timeouts get VV_UPSTREAM_TIMEOUT (retriable), not NO_GENOMIC_COORDS."""
+    mut_client.normalize.return_value = {"normalized_description": "NM_006749.5:c.1240G>T"}
+    vv_client.mane_select.side_effect = VariantValidatorError("UPSTREAM_TIMEOUT", "read timed out")
+
+    result = pipe.process_one(VariantInput(gene="SLC20A2", variant="c.1240G>T"), "GRCh38")
+    assert result.error is not None
+    assert result.error.code == "VV_UPSTREAM_TIMEOUT"
+    assert result.error.upstream == "variantvalidator"
+
+
+def test_vv_timeout_with_other_candidates_failing_still_retriable(
+    pipe: pipeline.Pipeline,
+    vv_client: MagicMock,
+    mut_client: MagicMock,
+) -> None:
+    """Protein input back-translates to multiple candidates; if any timed out
+    (and none resolved), the request is retriable — surfaced as VV_UPSTREAM_TIMEOUT."""
+    mut_client.normalize.return_value = {"normalized_description": "NM_X(NP_Y):p.Arg191Gln"}
+    mut_client.back_translate.return_value = ["NM_X:c.572G>A", "NM_X:c.571C>T"]
+    vv_client.mane_select.side_effect = [
+        VariantValidatorError("UPSTREAM_TIMEOUT", "read timed out"),
+        VariantValidatorError("NO_GENOMIC_COORDS", "VV had nothing"),
+    ]
+
+    result = pipe.process_one(VariantInput(gene="PDGFB", variant="p.Arg191Gln"), "GRCh38")
+    assert result.error is not None
+    assert result.error.code == "VV_UPSTREAM_TIMEOUT"
+
+
+def test_mutalyzer_normalize_timeout_surfaces_as_retriable_code(
+    pipe: pipeline.Pipeline,
+    mut_client: MagicMock,
+) -> None:
+    mut_client.normalize.side_effect = MutalyzerError("UPSTREAM_TIMEOUT", "read timed out")
+
+    result = pipe.process_one(VariantInput(gene="SLC20A2", variant="c.1240G>T"), "GRCh38")
+    assert result.error is not None
+    assert result.error.code == "NORMALIZATION_UPSTREAM_TIMEOUT"
+    assert result.error.upstream == "mutalyzer"
+
+
 def test_mutalyzer_normalize_failure_produces_error_result(
     pipe: pipeline.Pipeline,
     mut_client: MagicMock,

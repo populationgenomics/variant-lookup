@@ -95,7 +95,13 @@ def create_app() -> FastAPI:
         description: str,
         settings: Annotated[Settings, Depends(get_settings)],
     ) -> dict[str, Any]:
-        return MutalyzerClient(settings.mutalyzer_base_url).normalize_raw(description)
+        try:
+            return MutalyzerClient(settings.mutalyzer_base_url).normalize_raw(description)
+        except MutalyzerError as e:
+            raise HTTPException(
+                status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+                detail={"code": e.code, "message": e.message},
+            ) from e
 
     @app.get(
         "/mutalyzer/back_translate/{description:path}",

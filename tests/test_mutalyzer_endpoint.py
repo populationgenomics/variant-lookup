@@ -64,3 +64,19 @@ def test_back_translate_frameshift_returns_422() -> None:
         )
     assert response.status_code == 422
     assert response.json()["detail"]["code"] == "FRAMESHIFT_UNSUPPORTED"
+
+
+def test_normalize_passthrough_returns_422_on_mutalyzer_error() -> None:
+    """Upstream 422 (EINTRONIC etc.) gets surfaced as 422 with structured detail,
+    not as an opaque 500 from an unhandled exception."""
+    with patch("variant_lookup.api.MutalyzerClient") as MC:
+        MC.return_value.normalize_raw.side_effect = MutalyzerError(
+            "EINTRONIC", "intronic position needs genomic ref"
+        )
+        client = TestClient(create_app())
+        response = client.get(
+            "/mutalyzer/normalize/NM_000257.4:c.3973-2A%3EC",
+            headers={"Authorization": f"Bearer {TEST_BEARER}"},
+        )
+    assert response.status_code == 422
+    assert response.json()["detail"]["code"] == "EINTRONIC"

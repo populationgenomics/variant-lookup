@@ -95,3 +95,16 @@ def test_mane_select_upstream_error_raises(client: VariantValidatorClient) -> No
     with pytest.raises(VariantValidatorError) as exc:
         client.mane_select("whatever")
     assert exc.value.code == "UPSTREAM_ERROR"
+
+
+@respx.mock
+def test_mane_select_timeout_distinguished_from_other_errors(
+    client: VariantValidatorClient,
+) -> None:
+    """Cold-cache timeouts get a retriable UPSTREAM_TIMEOUT code so callers know to retry."""
+    respx.get(f"{_BASE}/VariantValidator/variantvalidator/GRCh38/big/mane_select").mock(
+        side_effect=httpx.ReadTimeout("read timed out")
+    )
+    with pytest.raises(VariantValidatorError) as exc:
+        client.mane_select("big")
+    assert exc.value.code == "UPSTREAM_TIMEOUT"

@@ -77,6 +77,25 @@ def _extract_error(response: dict[str, Any]) -> tuple[str, str] | None:
     return err.get("code", "UNKNOWN"), err.get("details", "")
 
 
+def _structured_422(response: httpx.Response) -> "MutalyzerError":
+    """Promote a Mutalyzer 422 to a typed error with the structured upstream code.
+
+    Mutalyzer signals input-level problems with HTTP 422 carrying a JSON body
+    of the form ``{"errors": [{"code": "EINTRONIC", "details": "..."}], ...}``.
+    Pulling that code through gives callers an actionable error
+    (``NORMALIZATION_EINTRONIC`` etc.) instead of an opaque
+    ``UPSTREAM_ERROR: Client error '422 …'``.
+    """
+    try:
+        body = cast("dict[str, Any]", response.json())
+    except ValueError:
+        return MutalyzerError("UPSTREAM_ERROR", f"422 (non-JSON body): {response.text[:200]}")
+    error = _extract_error(body)
+    if error:
+        return MutalyzerError(code=error[0], message=error[1])
+    return MutalyzerError("UPSTREAM_ERROR", "422 with no errors[] in body")
+
+
 def _trim(response: dict[str, Any]) -> dict[str, Any]:
     """Return only the fields the pipeline cares about."""
     out: dict[str, Any] = {}
@@ -111,6 +130,13 @@ class MutalyzerClient:
         url = f"{self._base_url}/api/normalize/{quote(hgvs, safe='')}"
         try:
             response = httpx.get(url, timeout=self._timeout)
+        except httpx.TimeoutException as e:
+            raise MutalyzerError("UPSTREAM_TIMEOUT", str(e)) from e
+        except httpx.HTTPError as e:
+            raise MutalyzerError("UPSTREAM_ERROR", str(e)) from e
+        if response.status_code == 422:
+            raise _structured_422(response)
+        try:
             response.raise_for_status()
         except httpx.HTTPError as e:
             raise MutalyzerError("UPSTREAM_ERROR", str(e)) from e
@@ -134,6 +160,13 @@ class MutalyzerClient:
         url = f"{self._base_url}/api/back_translate/{quote(hgvsp, safe='')}"
         try:
             response = httpx.get(url, timeout=self._timeout)
+        except httpx.TimeoutException as e:
+            raise MutalyzerError("UPSTREAM_TIMEOUT", str(e)) from e
+        except httpx.HTTPError as e:
+            raise MutalyzerError("UPSTREAM_ERROR", str(e)) from e
+        if response.status_code == 422:
+            raise _structured_422(response)
+        try:
             response.raise_for_status()
         except httpx.HTTPError as e:
             raise MutalyzerError("UPSTREAM_ERROR", str(e)) from e

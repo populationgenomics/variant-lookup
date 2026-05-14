@@ -73,6 +73,61 @@ def test_normalize_raises_on_http_error(client: MutalyzerClient) -> None:
     assert exc.value.code == "UPSTREAM_ERROR"
 
 
+@respx.mock
+def test_normalize_extracts_structured_code_from_422(client: MutalyzerClient) -> None:
+    """Mutalyzer 422s carry a JSON body with the actionable error code."""
+    respx.get(f"{_BASE}/api/normalize/NM_000257.4%3Ac.3973-2A%3EC").mock(
+        return_value=Response(
+            422,
+            json={
+                "errors": [{"code": "EINTRONIC", "details": "intronic position needs genomic ref"}]
+            },
+        )
+    )
+    with pytest.raises(MutalyzerError) as exc:
+        client.normalize("NM_000257.4:c.3973-2A>C")
+    assert exc.value.code == "EINTRONIC"
+    assert "intronic" in exc.value.message
+
+
+@respx.mock
+def test_normalize_422_non_json_falls_back_to_upstream_error(
+    client: MutalyzerClient,
+) -> None:
+    respx.get(f"{_BASE}/api/normalize/x").mock(return_value=Response(422, text="<html>nope</html>"))
+    with pytest.raises(MutalyzerError) as exc:
+        client.normalize("x")
+    assert exc.value.code == "UPSTREAM_ERROR"
+    assert "non-JSON" in exc.value.message
+
+
+@respx.mock
+def test_normalize_timeout_distinguished_from_other_errors(
+    client: MutalyzerClient,
+) -> None:
+    """Read/Connect timeouts get a retriable UPSTREAM_TIMEOUT code."""
+    import httpx as _httpx
+
+    respx.get(f"{_BASE}/api/normalize/x").mock(side_effect=_httpx.ReadTimeout("read timed out"))
+    with pytest.raises(MutalyzerError) as exc:
+        client.normalize("x")
+    assert exc.value.code == "UPSTREAM_TIMEOUT"
+
+
+@respx.mock
+def test_back_translate_timeout_distinguished_from_other_errors(
+    client: MutalyzerClient,
+) -> None:
+    import httpx as _httpx
+
+    respx.get(f"{_BASE}/api/back_translate/p").mock(
+        side_effect=_httpx.ReadTimeout("read timed out")
+    )
+    with pytest.raises(MutalyzerError) as exc:
+        client.back_translate("p")
+    assert exc.value.code == "UPSTREAM_TIMEOUT"
+
+
 def test_frameshift_skips_http_and_canonicalises(client: MutalyzerClient) -> None:
     # Frameshift inputs short-circuit before hitting mutalyzer-api.
     # respx not mocked here — would raise if the code tried to make a real call.
@@ -106,3 +161,16 @@ def test_back_translate_raises_on_http_error(client: MutalyzerClient) -> None:
     with pytest.raises(MutalyzerError) as exc:
         client.back_translate("p")
     assert exc.value.code == "UPSTREAM_ERROR"
+
+
+@respx.mock
+def test_back_translate_extracts_structured_code_from_422(client: MutalyzerClient) -> None:
+    respx.get(f"{_BASE}/api/back_translate/NP_X%3Ap.Arg191Gln").mock(
+        return_value=Response(
+            422,
+            json={"errors": [{"code": "EBACKTRANSLATE", "details": "can't back-translate"}]},
+        )
+    )
+    with pytest.raises(MutalyzerError) as exc:
+        client.back_translate("NP_X:p.Arg191Gln")
+    assert exc.value.code == "EBACKTRANSLATE"

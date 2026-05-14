@@ -104,19 +104,34 @@ class Pipeline:
 
     def _resolve_via_vv(self, candidates: list[str]) -> "list[VVResult] | _PipelineError":
         vv_results: list[VVResult] = []
-        last_error: VariantValidatorError | None = None
+        errors: list[VariantValidatorError] = []
         for candidate in candidates:
             with self._timed("variantvalidator"):
                 try:
                     vv_results.append(self.vv_client.mane_select(_strip_parens(candidate)))
                 except VariantValidatorError as e:
-                    last_error = e
+                    errors.append(e)
         if vv_results:
             return vv_results
-        message = (
-            f"{last_error.code}: {last_error.message}" if last_error else "no candidates resolved"
+        # If any candidate hit a transient upstream timeout, surface as a
+        # retriable code so the caller can re-issue once VV's per-gene cache
+        # has warmed. NO_GENOMIC_COORDS is reserved for the genuine "VV
+        # returned but has no GRCh38 mapping" case, which is not retriable.
+        timeout = next((e for e in errors if e.code == "UPSTREAM_TIMEOUT"), None)
+        if timeout:
+            return _PipelineError(
+                "VV_UPSTREAM_TIMEOUT", timeout.message, upstream="variantvalidator"
+            )
+        if not errors:
+            return _PipelineError(
+                "NO_GENOMIC_COORDS", "no candidates resolved", upstream="variantvalidator"
+            )
+        last = errors[-1]
+        return _PipelineError(
+            "NO_GENOMIC_COORDS",
+            f"{last.code}: {last.message}",
+            upstream="variantvalidator",
         )
-        return _PipelineError("NO_GENOMIC_COORDS", message, upstream="variantvalidator")
 
     def _cleanup_and_normalize(self, variant: VariantInput, genome_build: str | None) -> list[str]:
         """Apply rsID lookup / text cleanup / Mutalyzer normalization / back-translation."""
