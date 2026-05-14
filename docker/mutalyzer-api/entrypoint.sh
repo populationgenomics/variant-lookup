@@ -34,6 +34,6 @@ exec gunicorn \
     --chdir /app \
     --workers "${MUTALYZER_API_WORKERS}" \
     --bind "0.0.0.0:${MUTALYZER_API_PORT}" \
-    --timeout 120 \
+    --timeout 180 \
     --access-logfile - \
     --error-logfile -

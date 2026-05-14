@@ -93,7 +93,10 @@ def _trim(response: dict[str, Any]) -> dict[str, Any]:
 class MutalyzerClient:
     """HTTP client for the sibling mutalyzer-api service."""
 
-    def __init__(self, base_url: str, *, timeout: float = 60.0) -> None:
+    def __init__(self, base_url: str, *, timeout: float = 150.0) -> None:
+        # 150 s gives the cold-fetch path room (chromosomal-scale FASTA from
+        # NCBI over the cross-Pacific link can take 60-90 s) without hitting
+        # nginx's 180 s proxy_read_timeout.
         self._base_url = base_url.rstrip("/")
         self._timeout = timeout
 
