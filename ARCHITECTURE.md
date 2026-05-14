@@ -244,7 +244,7 @@ Reference data is **manually refreshed** in v1. A single `scripts/setup.sh` scri
 |---|---|---|---|---|
 | echtvar archives (24 per-chrom) | gnomAD release notes | gnomAD point releases (rare) | `refresh-echtvar` | ~3-5 h: ~800 GB S3 sync, then per-chromosome parallel encode of 24 VCFs |
 | refseq_processed.json | NCBI RefSeq GFF | New GRCh38 patch (every ~6 mo) | `refresh-refseq` | minutes |
-| Mutalyzer cache | NCBI on first use + bootstrap pre-populate | Bootstrap + on-demand for non-chromosomal refs | `refresh-mutalyzer-cache` | ~30-60 min one-shot: pre-fetches every GRCh37/38 `NC_*` accession (GFF3 + FASTA) via upstream's `ncbi_assemblies` populator. Non-`NC_*` refs (`NM_*`, `NP_*`) warm on demand at runtime. |
+| Mutalyzer cache | NCBI on first use | Auto-warmed; cache files persist across restarts | n/a (lazy) | First request per accession pays ~20 s (NCBI fetch + parse, written to disk). Subsequent requests load from `${DATA_DIR}/mutalyzer/cache` (sub-second). We don't pre-populate: variant inputs from literature can reference any historical NM_/NP_/NC_ version, so any fixed list would be incomplete. |
 | VV seqdata / vvta / vdb | VV upstream master | Re-running `vendor-vv` fetches latest master | `vendor-vv` + `build-vv` | ~1 h compile + ~30 min db init |
 | Staging VCFs (post-encode) | n/a | After all 24 echtvar archives exist | `cleanup-echtvar-staging` | seconds; reclaims ~800 GB |
 
@@ -303,9 +303,9 @@ Neither is in scope for v1.
 ### `mutalyzer-api` (MIT, packaged as `mutalyzer-api` on PyPI)
 
 - Image built locally from `docker/mutalyzer-api/Dockerfile`: `pip install mutalyzer-api gunicorn` on top of `python:3.13-slim`.
-- Runs `gunicorn 'mutalyzer_api.endpoints:app' --workers ${MUTALYZER_API_WORKERS:-4}` behind an entrypoint that generates the `mutalyzer-retriever` config file from env vars (`NCBI_EUTILS_EMAIL`, `NCBI_EUTILS_API_KEY`).
-- Cache: bind-mount `${DATA_DIR}/mutalyzer/cache/` into `/data/mutalyzer/cache/`. Populated by `scripts/setup.sh refresh-mutalyzer-cache`. Each gunicorn worker maintains its own in-process LRU on top of the shared file cache.
-- The same image is reused as the cache populator: `docker run … variant-lookup-mutalyzer-api:latest populate-cache` runs upstream's `mutalyzer_retriever ncbi_assemblies …` and writes into the same cache directory.
+- Runs `gunicorn wsgi:app --workers ${MUTALYZER_API_WORKERS:-4}` behind an entrypoint that generates the `mutalyzer-retriever` config file from env vars (`NCBI_EUTILS_EMAIL`, `NCBI_EUTILS_API_KEY`, `MUTALYZER_LRU_CACHE_MAXSIZE`).
+- Cache: bind-mount `${DATA_DIR}/mutalyzer/cache/` into `/data/mutalyzer/cache/`. Files (`<r_id>.annotations` + `<r_id>.sequence`) are written lazily on first request per accession; subsequent requests across all workers serve from disk. Each gunicorn worker also keeps a bounded in-process LRU (`MUTALYZER_LRU_CACHE_MAXSIZE`, default 25 — enough for a whole assembly).
+- `wsgi.py` monkey-patches upstream's `get_*_from_file_cache` readers to fix a None-poison bug in `mutalyzer-retriever` (its `@lru_cache` caches the `None` returned on cold-miss, defeating the file cache for the rest of the worker's lifetime). Our wrapper caches non-`None` results only and respects the same size cap.
 
 ### `variantvalidator` (vendored upstream sources)
 

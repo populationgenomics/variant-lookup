@@ -23,8 +23,11 @@ RUN pip install --no-cache-dir \
 
 ENV MUTALYZER_CACHE_DIR=/data/mutalyzer/cache \
     MUTALYZER_API_WORKERS=4 \
-    MUTALYZER_API_PORT=5000
+    MUTALYZER_API_PORT=5000 \
+    MUTALYZER_LRU_CACHE_MAXSIZE=25
 
+WORKDIR /app
+COPY wsgi.py /app/wsgi.py
 COPY entrypoint.sh /entrypoint.sh
 RUN chmod +x /entrypoint.sh
 

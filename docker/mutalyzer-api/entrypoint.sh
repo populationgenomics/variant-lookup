@@ -1,8 +1,11 @@
 #!/bin/sh
 # Generate the mutalyzer-retriever config file from env vars and launch
-# gunicorn. mutalyzer_retriever.configuration reads MUTALYZER_SETTINGS at
-# import time, expecting a file path; envvar-only configuration is not
-# supported upstream, so we materialise the file here.
+# gunicorn against our wsgi.py wrapper (see ../wsgi.py for the file-cache
+# None-poison fix and bounded LRU).
+#
+# mutalyzer_retriever.configuration reads MUTALYZER_SETTINGS at import time,
+# expecting a file path; envvar-only configuration is not supported upstream,
+# so we materialise the file here.
 
 set -eu
 
@@ -14,6 +17,11 @@ CONFIG_PATH=/etc/mutalyzer.conf
 {
     printf "MUTALYZER_CACHE_DIR = %s\n" "${MUTALYZER_CACHE_DIR}"
     printf "MUTALYZER_FILE_CACHE_ADD = true\n"
+    # Bounds upstream's @lru_cache on retrieve_raw (and a couple of related
+    # functions). wsgi.py monkey-patches the two file-cache readers with its
+    # own bounded LRU keyed on the same env var, so all three caches respect
+    # the same cap.
+    printf "MUTALYZER_LRU_CACHE_MAXSIZE = %s\n" "${MUTALYZER_LRU_CACHE_MAXSIZE}"
     printf "EMAIL = %s\n" "${NCBI_EUTILS_EMAIL}"
     if [ -n "${NCBI_EUTILS_API_KEY:-}" ]; then
         printf "NCBI_API_KEY = %s\n" "${NCBI_EUTILS_API_KEY}"
@@ -21,26 +29,9 @@ CONFIG_PATH=/etc/mutalyzer.conf
 } > "${CONFIG_PATH}"
 export MUTALYZER_SETTINGS="${CONFIG_PATH}"
 
-# If the first argument is the populator marker, run the cache populator
-# instead of the server. Used by scripts/setup.sh refresh-mutalyzer-cache so
-# the populator runs in the same image as the service (consistent deps + config).
-if [ "${1:-}" = "populate-cache" ]; then
-    exec python -c "
-import sys
-from mutalyzer_retriever.cli import main
-sys.argv = [
-    'mutalyzer_retriever', 'ncbi_assemblies',
-    '--ref_id_start', 'NC_',
-    '--assembly_id_start', 'GRCh',
-    '--output', '${MUTALYZER_CACHE_DIR}',
-    '--include_sequence',
-]
-main()
-"
-fi
-
 exec gunicorn \
-    "mutalyzer_api.endpoints:app" \
+    "wsgi:app" \
+    --chdir /app \
     --workers "${MUTALYZER_API_WORKERS}" \
     --bind "0.0.0.0:${MUTALYZER_API_PORT}" \
     --timeout 120 \

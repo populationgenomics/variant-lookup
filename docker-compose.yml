@@ -79,6 +79,7 @@ services:
       NCBI_EUTILS_EMAIL: ${NCBI_EUTILS_EMAIL}
       NCBI_EUTILS_API_KEY: ${NCBI_EUTILS_API_KEY:-}
       MUTALYZER_API_WORKERS: ${MUTALYZER_API_WORKERS:-4}
+      MUTALYZER_LRU_CACHE_MAXSIZE: ${MUTALYZER_LRU_CACHE_MAXSIZE:-25}
     volumes:
       - ${DATA_DIR}/mutalyzer/cache:/data/mutalyzer/cache
     restart: always

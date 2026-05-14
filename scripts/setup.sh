@@ -8,7 +8,6 @@
 #   ./scripts/setup.sh build-vv         # build VariantValidator's docker images (slow, ~1 h)
 #   ./scripts/setup.sh refresh-echtvar  # download gnomAD VCFs and encode the echtvar archive
 #   ./scripts/setup.sh refresh-refseq   # rebuild the RefSeq MANE-Select index
-#   ./scripts/setup.sh refresh-mutalyzer-cache  # pre-populate the Mutalyzer chromosome cache
 #   ./scripts/setup.sh build-gateway    # build the gateway image
 #   ./scripts/setup.sh build-mutalyzer-api  # build the mutalyzer-api image
 #   ./scripts/setup.sh cleanup-echtvar-staging  # delete VCF staging dir after successful encode
@@ -214,37 +213,6 @@ build_mutalyzer_api() {
     ( cd "${REPO_ROOT}" && docker compose build mutalyzer-api )
 }
 
-refresh_mutalyzer_cache() {
-    # Pre-populate mutalyzer-retriever's file cache with every GRCh37/38
-    # chromosomal NC_ reference. Upstream's documented populator:
-    # https://mutalyzer.readthedocs.io/en/latest/usage.html#enable-the-file-based-cache
-    #
-    # Without this, the first mutalyzer-api request for each chromosomal
-    # reference pays a ~20 s NCBI fetch + parse. Worse, upstream's
-    # @lru_cache on the file-cache readers caches the cold-miss None, so
-    # the next request in the same worker process keeps paying the parse
-    # cost even after retrieve_model wrote the file. Pre-populating means
-    # the files exist before the service ever reads from them.
-    : "${NCBI_EUTILS_EMAIL:?NCBI_EUTILS_EMAIL must be set in .env}"
-    if ! docker image inspect variant-lookup-mutalyzer-api:latest >/dev/null 2>&1; then
-        echo "ERROR: variant-lookup-mutalyzer-api:latest not built — run '$0 build-mutalyzer-api' first." >&2
-        exit 1
-    fi
-
-    log "Pre-populating Mutalyzer cache for GRCh37+GRCh38 chromosomal NC_ refs"
-    log "    target: ${DATA_DIR}/mutalyzer/cache/"
-    log "    expect ~30-60 min depending on NCBI throughput and API-key tier"
-    mkdir -p "${DATA_DIR}/mutalyzer/cache"
-    docker run --rm \
-        --user "$(id -u):$(id -g)" \
-        -v "${DATA_DIR}/mutalyzer/cache:/data/mutalyzer/cache" \
-        -e NCBI_EUTILS_EMAIL="${NCBI_EUTILS_EMAIL}" \
-        -e NCBI_EUTILS_API_KEY="${NCBI_EUTILS_API_KEY:-}" \
-        variant-lookup-mutalyzer-api:latest \
-        populate-cache
-    log "Done. Mutalyzer cache pre-populated at ${DATA_DIR}/mutalyzer/cache/"
-}
-
 cleanup_echtvar_staging() {
     # Once all 24 per-chromosome archives exist in ${DATA_DIR}/echtvar/, the
     # source VCFs (~700 GB) and the build/ intermediate dir can go.
@@ -272,10 +240,15 @@ bootstrap() {
     ensure_vv_data_dirs
     build_vv
     build_gateway          # must precede refresh_echtvar
-    build_mutalyzer_api    # must precede refresh_mutalyzer_cache
+    build_mutalyzer_api
     refresh_echtvar
     refresh_refseq
-    refresh_mutalyzer_cache
+    # Note: no Mutalyzer cache pre-populate. The mutalyzer-api file cache
+    # warms lazily on first request for each accession (~20 s cold cost),
+    # then persists across restarts in ${DATA_DIR}/mutalyzer/cache. We
+    # can't enumerate every accession a literature-extracted variant might
+    # reference (any historical NM_/NP_/NC_ version), so a fixed pre-pop
+    # list would be incomplete anyway.
     cat <<EOF
 
 Bootstrap complete. Bring the stack up with:
@@ -296,7 +269,6 @@ case "${1:-bootstrap}" in
     build-vv)                   build_vv ;;
     refresh-echtvar)            refresh_echtvar ;;
     refresh-refseq)             refresh_refseq ;;
-    refresh-mutalyzer-cache)    refresh_mutalyzer_cache ;;
     build-gateway)              build_gateway ;;
     build-mutalyzer-api)        build_mutalyzer_api ;;
     cleanup-echtvar-staging)    cleanup_echtvar_staging ;;
