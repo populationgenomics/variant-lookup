@@ -1,4 +1,4 @@
-"""Request and response schemas for /v1/variants. See ARCHITECTURE.md § 'Public API'."""
+"""Request and response schemas for /v1/variant. See ARCHITECTURE.md § 'Public API'."""
 
 from pydantic import BaseModel, Field
 
@@ -17,12 +17,17 @@ class VariantInput(BaseModel):
     )
 
 
-class VariantBatchRequest(BaseModel):
+class VariantRequest(VariantInput):
+    """Body shape of ``POST /v1/variant``.
+
+    Same fields as ``VariantInput`` plus ``genome_build``, which is per-request
+    rather than per-variant — placed at the body root for ergonomics.
+    """
+
     genome_build: str = Field(
         ...,
         description="GRCh38 or GRCh37 (latter is projected to GRCh38 via VV).",
     )
-    variants: list[VariantInput] = Field(..., max_length=1000)
 
 
 class Frequency(BaseModel):
@@ -61,20 +66,13 @@ class VariantError(BaseModel):
     message: str
 
 
-class VariantResult(BaseModel):
-    id: str
-    input: VariantInput
-    normalized: list[NormalizedVariant] | None
-    error: VariantError | None
-
-
 class ResponseMeta(BaseModel):
-    """Top-level metadata stamped into every ``/v1/variants`` response.
+    """Top-level metadata stamped into every ``POST /v1/variant`` response.
 
-    ``durations_ms`` reports wall-clock time spent in each pipeline stage
-    (summed across all variants in the batch). Keys: ``cleanup``, ``rsid``,
-    ``normalize``, ``back_translate``, ``variantvalidator``, ``echtvar``,
-    ``total``. Stages that did not fire for this batch report ``0``.
+    ``durations_ms`` reports wall-clock time spent in each pipeline stage for
+    this request. Keys: ``cleanup``, ``rsid``, ``normalize``,
+    ``back_translate``, ``variantvalidator``, ``echtvar``, ``total``. Stages
+    that did not fire for this request report ``0``.
     """
 
     service: str
@@ -86,9 +84,14 @@ class ResponseMeta(BaseModel):
     durations_ms: dict[str, int]
 
 
-class VariantBatchResponse(BaseModel):
+class VariantResponse(BaseModel):
+    """Body shape returned by ``POST /v1/variant``."""
+
     meta: ResponseMeta
-    results: list[VariantResult]
+    id: str
+    input: VariantInput
+    normalized: list[NormalizedVariant] | None
+    error: VariantError | None
 
 
 # --- /echtvar/frequencies passthrough -------------------------------------

@@ -55,20 +55,22 @@ The replacement path is the higher-priority longer-term change.
 
 ## Public API
 
-### `POST /v1/variants`
+### `POST /v1/variant`
 
-Authenticated bulk lookup. Max 1000 variants per request (rejected with 413 above that).
+Authenticated single-variant lookup. Mutalyzer's per-call CPU cost (~1.6 s
+post-cache, GIL-held) means batching cannot be parallelised inside a single
+gateway worker. Concurrency lives at the **HTTP layer** instead: callers
+issue multiple concurrent requests; uvicorn workers + nginx's
+`limit_conn` enforce the global in-flight cap.
 
 Request:
 
 ```json
 {
   "genome_build": "GRCh38",
-  "variants": [
-    {"id": "v1", "gene": "SLC20A2", "variant": "c.1240G>T"},
-    {"id": "v2", "gene": "PDGFB",   "variant": "p.Arg191*"},
-    {"id": "v3",                    "variant": "NC_000016.10:g.2116896C>A"}
-  ]
+  "id": "v1",
+  "gene": "SLC20A2",
+  "variant": "c.1240G>T"
 }
 ```
 
@@ -77,7 +79,9 @@ Request:
 `NM_…:c.…`, `NP_…:p.…`) or an rsID — there's enough information in the
 string itself.
 
-Response (always 200 unless the request itself is malformed, auth fails, or the service is broken):
+Response (always 200 unless the request itself is malformed, auth fails, the
+service is broken, or the in-flight cap is exceeded — see "Errors at the
+HTTP layer" below):
 
 ```json
 {
@@ -86,50 +90,36 @@ Response (always 200 unless the request itself is malformed, auth fails, or the 
     "reference": "GRCh38",
     "gnomad": "4.1",
     "variantvalidator": "2.2.0",
-    "mutalyzer": "3.0.4",
+    "mutalyzer": "3.1.1",
     "timestamp": "2026-05-13T...",
     "durations_ms": {
-      "cleanup": 1, "rsid": 0, "normalize": 12, "back_translate": 0,
-      "variantvalidator": 1480, "echtvar": 80, "total": 1573
+      "cleanup": 1, "rsid": 0, "normalize": 1572, "back_translate": 0,
+      "variantvalidator": 980, "echtvar": 80, "total": 2640
     }
   },
-  "results": [
+  "id": "v1",
+  "input": {"id": "v1", "gene": "SLC20A2", "variant": "c.1240G>T"},
+  "normalized": [
     {
-      "id": "v1",
-      "input": {"id": "v1", "gene": "SLC20A2", "variant": "c.1240G>T"},
-      "normalized": [
-        {
-          "pseudo_vcf": "8-42437272-C-A",
-          "hgvs_c": "NM_001257180.2:c.1240G>T",
-          "hgvs_p": "NP_001244109.1:p.Glu414Ter",
-          "frequency": {
-            "ac": 1, "an": 1614174,
-            "homozygote_count": 0, "heterozygote_count": 1, "hemizygote_count": 0,
-            "faf95_popmax": null, "faf95_popmax_population": null
-          }
-        }
-      ],
-      "error": null
-    },
-    {
-      "id": "v2",
-      "input": {"id": "v2", "gene": "PDGFB", "variant": "p.Arg191*"},
-      "normalized": null,
-      "error": {
-        "code": "NORMALIZATION_FAILED",
-        "upstream": "mutalyzer",
-        "message": "..."
+      "pseudo_vcf": "8-42437272-C-A",
+      "hgvs_c": "NM_001257180.2:c.1240G>T",
+      "hgvs_p": "NP_001244109.1:p.Glu414Ter",
+      "frequency": {
+        "ac": 1, "an": 1614174,
+        "homozygote_count": 0, "heterozygote_count": 1, "hemizygote_count": 0,
+        "faf95_popmax": null, "faf95_popmax_population": null
       }
     }
-  ]
+  ],
+  "error": null
 }
 ```
 
 Key contract points:
 
 - **`normalized` is a list**, even for non-ambiguous inputs. Protein variants can back-translate to multiple coding variants; the service returns them all and leaves selection (max-AC, all, etc.) to the caller.
-- **Per-variant `error` field** is the failure surface. The HTTP response stays 200 even if every variant in the batch fails; callers iterate.
-- **`meta` is always present** and contains the versions of every component used to produce the results, so callers can pin/cite/reproduce. `meta.durations_ms` reports wall-clock time spent in each pipeline stage (`cleanup`, `rsid`, `normalize`, `back_translate`, `variantvalidator`, `echtvar`, `total`), summed across the batch. Stages that didn't fire for this batch report `0`.
+- **`error` field** is the failure surface for variant-domain errors. The HTTP response stays 200; callers inspect `error.code` (e.g. `VARIANT_CLEANUP_FAILED`, `NORMALIZATION_EREF`, `NO_GENOMIC_COORDS`).
+- **`meta` is always present** and contains the versions of every component used to produce the result, so callers can pin/cite/reproduce. `meta.durations_ms` reports wall-clock time spent in each pipeline stage (`cleanup`, `rsid`, `normalize`, `back_translate`, `variantvalidator`, `echtvar`, `total`). Stages that didn't fire report `0`.
 - **Frequency counts** satisfy `ac = 2*homozygote_count + heterozygote_count + hemizygote_count`. `hemizygote_count` is meaningful only on non-PAR chrX/Y; on autosomes and on the chrX/Y PAR regions it is `0` by construction. `heterozygote_count` is derived (`max(ac - 2*hom - hemi, 0)`) and emitted so callers don't have to compute it.
 - **`variant_not_found` in gnomAD** is not an error — `frequency` is `null` in that case. Distinguishable from an actual gnomAD lookup error by inspecting `error`.
 
@@ -168,11 +158,12 @@ FastAPI-generated. Behind the same API-key auth as everything else.
 
 - `400` — malformed request body
 - `401` — missing/invalid bearer token
-- `413` — batch larger than 1000
+- `422` — request body fails Pydantic validation (e.g. missing required field)
+- `429` — global in-flight cap exceeded; honour `Retry-After` (enforced by nginx — see "What runs where")
 - `503` — service or required upstream unavailable (paired with `/readyz` failing)
 - `500` — internal error (bug in the gateway)
 
-Per-variant errors are *never* at the HTTP layer — always `200` with `results[i].error` populated.
+Variant-domain errors are *never* at the HTTP layer — always `200` with `error` populated.
 
 ## Configuration
 

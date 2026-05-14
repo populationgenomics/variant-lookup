@@ -1,14 +1,14 @@
 """Per-variant pipeline orchestrator.
 
 Wires the components landed in Phases 1-5 into the end-to-end chain that
-``POST /v1/variants`` exposes:
+``POST /v1/variant`` exposes:
 
 1. parse + clean the raw text (or resolve an rsID via NCBI)
 2. normalize via Mutalyzer
 3. for ``p.`` inputs, back-translate to a list of coding-variant candidates
 4. for each candidate, ask VV for the GRCh38 pseudo-VCF + MANE-select hgvs-c/p
-5. bulk-lookup frequencies once via echtvar
-6. assemble per-variant :class:`VariantResult` objects in request order
+5. look up frequencies via echtvar
+6. assemble a :class:`VariantResponse`
 
 Per-stage wall-clock is captured into :class:`ResponseMeta`'s ``durations_ms``
 so callers can see where time went without external profiling.
@@ -26,10 +26,9 @@ from variant_lookup.config import Settings
 from variant_lookup.models import (
     NormalizedVariant,
     ResponseMeta,
-    VariantBatchResponse,
     VariantError,
     VariantInput,
-    VariantResult,
+    VariantResponse,
 )
 from variant_lookup.mutalyzer_client import MutalyzerClient, MutalyzerError
 from variant_lookup.refseq import RefSeqIndex
@@ -40,7 +39,7 @@ from variant_lookup.variantvalidator_client import (
 )
 
 # Stages reported in ResponseMeta.durations_ms. Listed explicitly (not derived
-# from the timing dict) so the response shape is stable even for batches
+# from the timing dict) so the response shape is stable even for requests
 # whose inputs don't exercise every stage.
 _STAGES: tuple[str, ...] = (
     "cleanup",
@@ -59,20 +58,39 @@ class Pipeline:
     refseq_index: RefSeqIndex
     vv_client: VariantValidatorClient
     mutalyzer_client: MutalyzerClient
-    # Per-request stage timings (ns). Populated as process_batch runs and read
+    # Per-request stage timings (ns). Populated as process_one runs and read
     # by _meta to fill ResponseMeta.durations_ms. Pipeline is constructed
-    # per-request in api._lookup_variants so this state is request-scoped.
+    # per-request in api._lookup_variant so this state is request-scoped.
     _durations_ns: dict[str, int] = field(
         default_factory=lambda: defaultdict(int), init=False, repr=False, compare=False
     )
 
-    def process_batch(
-        self, variants: list[VariantInput], genome_build: str
-    ) -> VariantBatchResponse:
+    def process_one(self, variant: VariantInput, genome_build: str) -> VariantResponse:
         with self._timed("total"):
-            results = [self._resolve_one(v, genome_build) for v in variants]
-            self._fill_frequencies(results)
-        return VariantBatchResponse(meta=self._meta(), results=results)
+            try:
+                normalized_hgvs_strings = self._cleanup_and_normalize(variant, genome_build)
+            except _PipelineError as e:
+                return self._error_response(variant, e)
+
+            vv_results = self._resolve_via_vv(normalized_hgvs_strings)
+            if isinstance(vv_results, _PipelineError):
+                return self._error_response(variant, vv_results)
+
+            normalized_variants = [
+                NormalizedVariant(
+                    pseudo_vcf=r.pseudo_vcf, hgvs_c=r.hgvs_c, hgvs_p=r.hgvs_p, frequency=None
+                )
+                for r in vv_results
+            ]
+            self._fill_frequencies(normalized_variants)
+
+        return VariantResponse(
+            meta=self._meta(),
+            id=variant.id,
+            input=variant,
+            normalized=normalized_variants,
+            error=None,
+        )
 
     # ----- timing ----------------------------------------------------------
 
@@ -86,43 +104,21 @@ class Pipeline:
 
     # ----- per-variant resolution to pseudo-VCFs ---------------------------
 
-    def _resolve_one(self, variant: VariantInput, genome_build: str) -> VariantResult:
-        try:
-            normalized_hgvs_strings = self._cleanup_and_normalize(variant, genome_build)
-        except _PipelineError as e:
-            return _error_result(variant, e)
-
+    def _resolve_via_vv(self, candidates: list[str]) -> "list[VVResult] | _PipelineError":
         vv_results: list[VVResult] = []
         last_error: VariantValidatorError | None = None
-        for candidate in normalized_hgvs_strings:
+        for candidate in candidates:
             with self._timed("variantvalidator"):
                 try:
                     vv_results.append(self.vv_client.mane_select(_strip_parens(candidate)))
                 except VariantValidatorError as e:
                     last_error = e
-
-        if not vv_results:
-            message = (
-                f"{last_error.code}: {last_error.message}"
-                if last_error
-                else "no candidates resolved"
-            )
-            return _error_result(
-                variant,
-                _PipelineError("NO_GENOMIC_COORDS", message, upstream="variantvalidator"),
-            )
-
-        return VariantResult(
-            id=variant.id,
-            input=variant,
-            normalized=[
-                NormalizedVariant(
-                    pseudo_vcf=r.pseudo_vcf, hgvs_c=r.hgvs_c, hgvs_p=r.hgvs_p, frequency=None
-                )
-                for r in vv_results
-            ],
-            error=None,
+        if vv_results:
+            return vv_results
+        message = (
+            f"{last_error.code}: {last_error.message}" if last_error else "no candidates resolved"
         )
+        return _PipelineError("NO_GENOMIC_COORDS", message, upstream="variantvalidator")
 
     def _cleanup_and_normalize(self, variant: VariantInput, genome_build: str) -> list[str]:
         """Apply rsID lookup / text cleanup / Mutalyzer normalization / back-translation."""
@@ -183,21 +179,12 @@ class Pipeline:
             except normalize.VariantCleanupError as e:
                 raise _PipelineError(code="VARIANT_CLEANUP_FAILED", message=str(e)) from e
 
-    # ----- bulk frequency lookup -------------------------------------------
+    # ----- frequency lookup ------------------------------------------------
 
-    def _fill_frequencies(self, results: list[VariantResult]) -> None:
-        positions: list[tuple[int, int]] = []
-        pseudo_vcfs: list[str] = []
-        for ri, result in enumerate(results):
-            if not result.normalized:
-                continue
-            for ni, nv in enumerate(result.normalized):
-                positions.append((ri, ni))
-                pseudo_vcfs.append(nv.pseudo_vcf)
-
-        if not pseudo_vcfs:
+    def _fill_frequencies(self, normalized_variants: list[NormalizedVariant]) -> None:
+        if not normalized_variants:
             return
-
+        pseudo_vcfs = [nv.pseudo_vcf for nv in normalized_variants]
         with self._timed("echtvar"):
             frequencies = echtvar.annotate(
                 pseudo_vcfs,
@@ -205,12 +192,10 @@ class Pipeline:
                 gnomad_version=self.settings.gnomad_version,
                 binary=self.settings.echtvar_bin,
             )
-        for (ri, ni), freq in zip(positions, frequencies, strict=True):
-            existing = results[ri].normalized
-            assert existing is not None  # mypy: positions only added when not None
-            existing[ni] = existing[ni].model_copy(update={"frequency": freq})
+        for i, freq in enumerate(frequencies):
+            normalized_variants[i] = normalized_variants[i].model_copy(update={"frequency": freq})
 
-    # ----- response meta ---------------------------------------------------
+    # ----- response builders -----------------------------------------------
 
     def _meta(self) -> ResponseMeta:
         return ResponseMeta(
@@ -223,6 +208,15 @@ class Pipeline:
             durations_ms={
                 stage: round(self._durations_ns.get(stage, 0) / 1_000_000) for stage in _STAGES
             },
+        )
+
+    def _error_response(self, variant: VariantInput, error: "_PipelineError") -> VariantResponse:
+        return VariantResponse(
+            meta=self._meta(),
+            id=variant.id,
+            input=variant,
+            normalized=None,
+            error=VariantError(code=error.code, upstream=error.upstream, message=error.message),
         )
 
 
@@ -241,12 +235,3 @@ def _strip_parens(hgvs: str) -> str:
     """Mutalyzer's back-translate output sometimes carries uncertainty parens;
     VV rejects them."""
     return hgvs.replace("(", "").replace(")", "")
-
-
-def _error_result(variant: VariantInput, error: "_PipelineError") -> VariantResult:
-    return VariantResult(
-        id=variant.id,
-        input=variant,
-        normalized=None,
-        error=VariantError(code=error.code, upstream=error.upstream, message=error.message),
-    )

@@ -17,8 +17,9 @@ from variant_lookup.models import (
     EchtvarFrequenciesRequest,
     EchtvarFrequenciesResponse,
     EchtvarResult,
-    VariantBatchRequest,
-    VariantBatchResponse,
+    VariantInput,
+    VariantRequest,
+    VariantResponse,
 )
 from variant_lookup.mutalyzer_client import MutalyzerClient, MutalyzerError
 from variant_lookup.pipeline import Pipeline
@@ -68,21 +69,23 @@ def create_app() -> FastAPI:
         return result
 
     @app.post(
-        "/v1/variants",
-        response_model=VariantBatchResponse,
+        "/v1/variant",
+        response_model=VariantResponse,
         dependencies=[Depends(require_api_key)],
     )
-    def _lookup_variants(
-        request: VariantBatchRequest,
+    def _lookup_variant(
+        request: VariantRequest,
         settings: Annotated[Settings, Depends(get_settings)],
-    ) -> VariantBatchResponse:
+    ) -> VariantResponse:
         pipeline = Pipeline(
             settings=settings,
             refseq_index=get_refseq_index(),
             vv_client=VariantValidatorClient(settings.vv_base_url),
             mutalyzer_client=MutalyzerClient(settings.mutalyzer_base_url),
         )
-        return pipeline.process_batch(request.variants, request.genome_build)
+        # Re-project to VariantInput (drop genome_build, which is per-request).
+        variant = VariantInput(id=request.id, variant=request.variant, gene=request.gene)
+        return pipeline.process_one(variant, request.genome_build)
 
     @app.get(
         "/mutalyzer/normalize/{description:path}",
