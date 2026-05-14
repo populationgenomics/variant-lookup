@@ -233,7 +233,7 @@ Reference data is **manually refreshed** in v1. A single `scripts/setup.sh` scri
 |---|---|---|---|---|
 | echtvar archives (24 per-chrom) | gnomAD release notes | gnomAD point releases (rare) | `refresh-echtvar` | ~3-5 h: ~800 GB S3 sync, then per-chromosome parallel encode of 24 VCFs |
 | refseq_processed.json | NCBI RefSeq GFF | New GRCh38 patch (every ~6 mo) | `refresh-refseq` | minutes |
-| Mutalyzer cache | NCBI on first use | Auto-warmed; manual flush if NCBI changes a record | n/a (auto) | n/a (lives in a docker-managed named volume) |
+| Mutalyzer cache | NCBI on first use + bootstrap pre-populate | Bootstrap + on-demand for non-chromosomal refs | `refresh-mutalyzer-cache` | ~30-60 min one-shot: pre-fetches every GRCh37/38 `NC_*` accession (GFF3 + FASTA) via upstream's `ncbi_assemblies` populator. Non-`NC_*` refs (`NM_*`, `NP_*`) warm on demand at runtime. |
 | VV seqdata / vvta / vdb | VV upstream master | Re-running `vendor-vv` fetches latest master | `vendor-vv` + `build-vv` | ~1 h compile + ~30 min db init |
 | Staging VCFs (post-encode) | n/a | After all 24 echtvar archives exist | `cleanup-echtvar-staging` | seconds; reclaims ~800 GB |
 

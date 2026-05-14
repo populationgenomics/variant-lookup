@@ -8,6 +8,7 @@
 #   ./scripts/setup.sh build-vv         # build VariantValidator's docker images (slow, ~1 h)
 #   ./scripts/setup.sh refresh-echtvar  # download gnomAD VCFs and encode the echtvar archive
 #   ./scripts/setup.sh refresh-refseq   # rebuild the RefSeq MANE-Select index
+#   ./scripts/setup.sh refresh-mutalyzer-cache  # pre-populate the Mutalyzer chromosome cache
 #   ./scripts/setup.sh build-gateway    # build the gateway image
 #   ./scripts/setup.sh cleanup-echtvar-staging  # delete VCF staging dir after successful encode
 #
@@ -207,6 +208,32 @@ build_gateway() {
     ( cd "${REPO_ROOT}" && docker compose build gateway )
 }
 
+refresh_mutalyzer_cache() {
+    # Pre-populate mutalyzer-retriever's file cache with every GRCh37/38
+    # chromosomal NC_ reference. Upstream's documented populator:
+    # https://mutalyzer.readthedocs.io/en/latest/usage.html#enable-the-file-based-cache
+    #
+    # Without this, the gateway's first request for each chromosomal
+    # reference pays a ~20 s NCBI fetch + parse, AND upstream's @lru_cache
+    # on the file-cache readers poisons the in-process cache with the
+    # cold-miss None — so repeat requests for the same accession in the
+    # same gateway process keep paying the full parse cost. See
+    # src/variant_lookup/mutalyzer_populate.py for details.
+    require_gateway_image
+    : "${NCBI_EUTILS_EMAIL:?NCBI_EUTILS_EMAIL must be set in .env}"
+
+    log "Pre-populating Mutalyzer cache for GRCh37+GRCh38 chromosomal NC_ refs"
+    log "    target: docker volume variant-lookup_mutalyzer-cache"
+    log "    expect ~30-60 min depending on NCBI throughput and API-key tier"
+    docker run --rm \
+        -v variant-lookup_mutalyzer-cache:/data/mutalyzer \
+        -e NCBI_EUTILS_EMAIL="${NCBI_EUTILS_EMAIL}" \
+        -e NCBI_EUTILS_API_KEY="${NCBI_EUTILS_API_KEY:-}" \
+        "${IMAGE_TAG}" \
+        /app/.venv/bin/python -m variant_lookup.mutalyzer_populate
+    log "Done. Mutalyzer cache pre-populated under variant-lookup_mutalyzer-cache"
+}
+
 cleanup_echtvar_staging() {
     # Once all 24 per-chromosome archives exist in ${DATA_DIR}/echtvar/, the
     # source VCFs (~700 GB) and the build/ intermediate dir can go.
@@ -233,9 +260,10 @@ bootstrap() {
     vendor_vv
     ensure_vv_data_dirs
     build_vv
-    build_gateway      # must precede refresh_echtvar (encode runs inside this image)
+    build_gateway      # must precede refresh_echtvar + refresh_mutalyzer_cache
     refresh_echtvar
     refresh_refseq
+    refresh_mutalyzer_cache
     cat <<EOF
 
 Bootstrap complete. Bring the stack up with:
@@ -256,6 +284,7 @@ case "${1:-bootstrap}" in
     build-vv)                   build_vv ;;
     refresh-echtvar)            refresh_echtvar ;;
     refresh-refseq)             refresh_refseq ;;
+    refresh-mutalyzer-cache)    refresh_mutalyzer_cache ;;
     build-gateway)              build_gateway ;;
     cleanup-echtvar-staging)    cleanup_echtvar_staging ;;
     -h|--help|help)
