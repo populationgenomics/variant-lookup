@@ -41,13 +41,11 @@ def test_e2e_coding_variant_returns_normalized_with_frequency() -> None:
 
     with (
         patch("variant_lookup.api.VariantValidatorClient") as VVC,
+        patch("variant_lookup.api.MutalyzerClient") as MC,
         patch("variant_lookup.pipeline.echtvar.annotate", return_value=[fake_freq]),
-        patch(
-            "variant_lookup.pipeline.mutalyzer_client.normalize",
-            return_value={"normalized_description": "NM_006749.5:c.1240G>T"},
-        ),
     ):
         VVC.return_value.mane_select.return_value = fake_vv
+        MC.return_value.normalize.return_value = {"normalized_description": "NM_006749.5:c.1240G>T"}
         client = TestClient(create_app())
         response = client.post(
             "/v1/variants",

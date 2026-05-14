@@ -42,9 +42,7 @@ _refseq_file.write_text(json.dumps({}))
 
 os.environ.setdefault("API_KEYS_FILE", str(_keys_file))
 os.environ.setdefault("VV_BASE_URL", "http://variantvalidator.invalid:8000")
+os.environ.setdefault("MUTALYZER_BASE_URL", "http://mutalyzer-api.invalid:5000")
 os.environ.setdefault("ECHTVAR_ARCHIVES_DIR", str(_TMPDIR / "echtvar"))
 os.environ.setdefault("REFSEQ_CACHE_PATH", str(_refseq_file))
 os.environ.setdefault("NCBI_EUTILS_EMAIL", "test@example.com")
-# mutalyzer_client._configure_retriever_cache() mkdir's this at import time;
-# point it at a writable tmp dir so tests don't try to create /data/mutalyzer/cache.
-os.environ.setdefault("MUTALYZER_CACHE_DIR", str(_TMPDIR / "mutalyzer-cache"))

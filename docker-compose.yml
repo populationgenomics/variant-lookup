@@ -2,11 +2,21 @@
 #
 # All deployment-specific values come from .env (copy .env.example, fill in).
 #
-# This file declares the gateway and nginx services. The VariantValidator
-# stack — built from pinned upstream SHAs, AGPL-3.0-only — is vendored under
-# vendor/ by scripts/setup.sh and brought up alongside this compose stack:
+# Services:
+#   gateway       — our FastAPI service (MIT). Pure orchestrator: no
+#                   variant-domain libraries in-process.
+#   mutalyzer-api — sibling container running the MIT mutalyzer-api package
+#                   (Mutalyzer 3 over HTTP). The gateway speaks to it the
+#                   same way it speaks to VariantValidator. Cache files
+#                   shared via the bind-mounted ${DATA_DIR}/mutalyzer/cache.
+#   nginx         — TLS termination + cluster-wide in-flight rate limit on
+#                   the main endpoint.
 #
-#   ./scripts/setup.sh                  # one-time bootstrap (clone + build VV, etc.)
+# The VariantValidator stack — built from upstream master, AGPL-3.0-only —
+# is vendored under vendor/ by scripts/setup.sh and brought up alongside
+# this compose stack:
+#
+#   ./scripts/setup.sh                  # one-time bootstrap
 #   docker compose \
 #     -f docker-compose.yml \
 #     -f vendor/rest_variantValidator/docker-compose.yml \
@@ -33,9 +43,9 @@ services:
     environment:
       API_KEYS_FILE: /etc/variant-lookup/api-keys.yaml
       VV_BASE_URL: http://variantvalidator:8000
+      MUTALYZER_BASE_URL: http://mutalyzer-api:5000
       ECHTVAR_BIN: echtvar
       ECHTVAR_ARCHIVES_DIR: /data/echtvar
-      MUTALYZER_CACHE_DIR: /data/mutalyzer/cache
       NCBI_EUTILS_EMAIL: ${NCBI_EUTILS_EMAIL}
       NCBI_EUTILS_API_KEY: ${NCBI_EUTILS_API_KEY:-}
       SERVICE_VERSION: ${SERVICE_VERSION:-0.1.0+dev}
@@ -43,11 +53,10 @@ services:
     volumes:
       - ${DATA_DIR}/echtvar:/data/echtvar:ro
       - ${DATA_DIR}/refseq:/data/refseq:ro
-      # Mutalyzer's reference-sequence cache lives in a docker-managed named
-      # volume rather than a host bind mount, so docker handles permissions
-      # to match the container's non-root UID.
-      - mutalyzer-cache:/data/mutalyzer
       - ${API_KEYS_HOST_FILE}:/etc/variant-lookup/api-keys.yaml:ro
+    depends_on:
+      mutalyzer-api:
+        condition: service_started
     restart: always
     healthcheck:
       test:
@@ -58,6 +67,20 @@ services:
       interval: 30s
       timeout: 5s
       retries: 3
+
+  mutalyzer-api:
+    image: variant-lookup-mutalyzer-api:latest
+    build:
+      context: docker/mutalyzer-api
+      args:
+        MUTALYZER_API_VERSION: ${MUTALYZER_API_VERSION:-0.3.2}
+    environment:
+      NCBI_EUTILS_EMAIL: ${NCBI_EUTILS_EMAIL}
+      NCBI_EUTILS_API_KEY: ${NCBI_EUTILS_API_KEY:-}
+      MUTALYZER_API_WORKERS: ${MUTALYZER_API_WORKERS:-4}
+    volumes:
+      - ${DATA_DIR}/mutalyzer/cache:/data/mutalyzer/cache
+    restart: always
 
   nginx:
     image: nginx:1.29-alpine
@@ -75,7 +98,3 @@ services:
       gateway:
         condition: service_started
     restart: always
-
-volumes:
-  mutalyzer-cache:
-    driver: local

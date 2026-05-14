@@ -10,6 +10,7 @@
 #   ./scripts/setup.sh refresh-refseq   # rebuild the RefSeq MANE-Select index
 #   ./scripts/setup.sh refresh-mutalyzer-cache  # pre-populate the Mutalyzer chromosome cache
 #   ./scripts/setup.sh build-gateway    # build the gateway image
+#   ./scripts/setup.sh build-mutalyzer-api  # build the mutalyzer-api image
 #   ./scripts/setup.sh cleanup-echtvar-staging  # delete VCF staging dir after successful encode
 #
 # Reads .env for DATA_DIR and pinned SHAs. All steps are idempotent.
@@ -208,30 +209,40 @@ build_gateway() {
     ( cd "${REPO_ROOT}" && docker compose build gateway )
 }
 
+build_mutalyzer_api() {
+    log "Building mutalyzer-api image"
+    ( cd "${REPO_ROOT}" && docker compose build mutalyzer-api )
+}
+
 refresh_mutalyzer_cache() {
     # Pre-populate mutalyzer-retriever's file cache with every GRCh37/38
     # chromosomal NC_ reference. Upstream's documented populator:
     # https://mutalyzer.readthedocs.io/en/latest/usage.html#enable-the-file-based-cache
     #
-    # Without this, the gateway's first request for each chromosomal
-    # reference pays a ~20 s NCBI fetch + parse, AND upstream's @lru_cache
-    # on the file-cache readers poisons the in-process cache with the
-    # cold-miss None — so repeat requests for the same accession in the
-    # same gateway process keep paying the full parse cost. See
-    # src/variant_lookup/mutalyzer_populate.py for details.
-    require_gateway_image
+    # Without this, the first mutalyzer-api request for each chromosomal
+    # reference pays a ~20 s NCBI fetch + parse. Worse, upstream's
+    # @lru_cache on the file-cache readers caches the cold-miss None, so
+    # the next request in the same worker process keeps paying the parse
+    # cost even after retrieve_model wrote the file. Pre-populating means
+    # the files exist before the service ever reads from them.
     : "${NCBI_EUTILS_EMAIL:?NCBI_EUTILS_EMAIL must be set in .env}"
+    if ! docker image inspect variant-lookup-mutalyzer-api:latest >/dev/null 2>&1; then
+        echo "ERROR: variant-lookup-mutalyzer-api:latest not built — run '$0 build-mutalyzer-api' first." >&2
+        exit 1
+    fi
 
     log "Pre-populating Mutalyzer cache for GRCh37+GRCh38 chromosomal NC_ refs"
-    log "    target: docker volume variant-lookup_mutalyzer-cache"
+    log "    target: ${DATA_DIR}/mutalyzer/cache/"
     log "    expect ~30-60 min depending on NCBI throughput and API-key tier"
+    mkdir -p "${DATA_DIR}/mutalyzer/cache"
     docker run --rm \
-        -v variant-lookup_mutalyzer-cache:/data/mutalyzer \
+        --user "$(id -u):$(id -g)" \
+        -v "${DATA_DIR}/mutalyzer/cache:/data/mutalyzer/cache" \
         -e NCBI_EUTILS_EMAIL="${NCBI_EUTILS_EMAIL}" \
         -e NCBI_EUTILS_API_KEY="${NCBI_EUTILS_API_KEY:-}" \
-        "${IMAGE_TAG}" \
-        /app/.venv/bin/python -m variant_lookup.mutalyzer_populate
-    log "Done. Mutalyzer cache pre-populated under variant-lookup_mutalyzer-cache"
+        variant-lookup-mutalyzer-api:latest \
+        populate-cache
+    log "Done. Mutalyzer cache pre-populated at ${DATA_DIR}/mutalyzer/cache/"
 }
 
 cleanup_echtvar_staging() {
@@ -260,7 +271,8 @@ bootstrap() {
     vendor_vv
     ensure_vv_data_dirs
     build_vv
-    build_gateway      # must precede refresh_echtvar + refresh_mutalyzer_cache
+    build_gateway          # must precede refresh_echtvar
+    build_mutalyzer_api    # must precede refresh_mutalyzer_cache
     refresh_echtvar
     refresh_refseq
     refresh_mutalyzer_cache
@@ -286,6 +298,7 @@ case "${1:-bootstrap}" in
     refresh-refseq)             refresh_refseq ;;
     refresh-mutalyzer-cache)    refresh_mutalyzer_cache ;;
     build-gateway)              build_gateway ;;
+    build-mutalyzer-api)        build_mutalyzer_api ;;
     cleanup-echtvar-staging)    cleanup_echtvar_staging ;;
     -h|--help|help)
         sed -n '2,15p' "$0"

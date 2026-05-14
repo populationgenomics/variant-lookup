@@ -1,60 +1,31 @@
-"""In-process Mutalyzer wrapper for HGVS normalization and back-translation.
+"""HTTP client for the sibling ``mutalyzer-api`` container.
 
-The Mutalyzer library is MIT-licensed (Leiden UMC), so we import and call
-it directly rather than going through an HTTP boundary. See ARCHITECTURE.md
-§ "AGPL boundary" for why this differs from how we reach VariantValidator.
+Mutalyzer 3 (MIT) runs as its own service rather than in-process in the
+gateway, mirroring how we already speak to VariantValidator. The boundary
+isn't license-driven (mutalyzer is MIT both sides) — it's operational:
 
-Reference-sequence fetching (``mutalyzer-retriever``) hits NCBI on cache
-miss and persists results under ``${MUTALYZER_CACHE_DIR}``.
+  - the per-process reference-sequence LRU stays in one place, scaling with
+    mutalyzer-api worker count rather than gateway worker count;
+  - the gateway image stays lean (no biopython, no mutalyzer-retriever);
+  - replacing mutalyzer later is a URL change, not a refactor;
+  - the existing nginx + uvicorn worker config can scale gateway-side
+    concurrency without touching the in-memory cache footprint.
 
-Frameshift normalization is not supported upstream; we apply our own minimal
-canonicalization for those, matching healthfutures-evagg's approach.
+Frameshift normalization is intentionally **not** delegated: upstream
+Mutalyzer doesn't normalize frameshift descriptions, so we apply
+healthfutures-evagg's canonicalization locally and short-circuit before
+hitting the API.
 """
 
-import os
 import re
-from pathlib import Path
 from typing import Any, cast
+from urllib.parse import quote
 
-
-def _configure_retriever_cache() -> None:
-    """Point mutalyzer-retriever at our cache directory and enable cache writes.
-
-    The retriever reads its config from an in-memory dict (``mutalyzer_retriever
-    .configuration.settings``) at call time, not from the environment, so we
-    patch the dict at import time. Two keys must both be set, or
-    ``mutalyzer_retriever.retriever.get_reference_model`` silently skips writing
-    the file cache and every call re-parses the reference from scratch:
-
-      - ``MUTALYZER_CACHE_DIR`` — where to read/write ``<accession>.annotations``
-        + ``<accession>.sequence`` files.
-      - ``MUTALYZER_FILE_CACHE_ADD`` — gates the cache-write branch in
-        ``get_reference_model``: ``if cache_add() and cache_path:``. Default is
-        unset (falsy), so writes never happen unless we explicitly enable them.
-
-    Without both, repeat calls for the same accession still pay ``parser.parse``
-    on the full reference content every request — ~20 s for a chromosome-scale
-    accession like ``NC_000016.10`` (chr16 GFF3 + FASTA).
-
-    The cache directory is created at startup so the retriever can write into it.
-    """
-    from mutalyzer_retriever.configuration import settings
-
-    cache_dir = Path(os.environ.get("MUTALYZER_CACHE_DIR", "/data/mutalyzer/cache"))
-    cache_dir.mkdir(parents=True, exist_ok=True)
-    settings["MUTALYZER_CACHE_DIR"] = str(cache_dir)
-    settings["MUTALYZER_FILE_CACHE_ADD"] = True
-
-
-_configure_retriever_cache()
-
-# Imports below this line; they don't trigger any retrieval at module load.
-from mutalyzer.back_translator import back_translate as _mt_back_translate  # noqa: E402
-from mutalyzer.normalizer import normalize as _mt_normalize  # noqa: E402
+import httpx
 
 
 class MutalyzerError(Exception):
-    """Mutalyzer returned an error response."""
+    """Mutalyzer returned an error response, or its HTTP API was unreachable."""
 
     def __init__(self, code: str, message: str = "") -> None:
         self.code = code
@@ -119,34 +90,54 @@ def _trim(response: dict[str, Any]) -> dict[str, Any]:
     return out
 
 
-def normalize_raw(hgvs: str) -> dict[str, Any]:
-    """Return Mutalyzer's raw normalize response — including any error entries.
+class MutalyzerClient:
+    """HTTP client for the sibling mutalyzer-api service."""
 
-    Used by the ``/mutalyzer/normalize`` passthrough endpoint, which mirrors
-    mutalyzer.nl's public API shape.
-    """
-    if _FS_PATTERN.search(hgvs.split(":", 1)[-1]):
-        return _normalize_frameshift(hgvs)
-    return cast("dict[str, Any]", _mt_normalize(hgvs))
+    def __init__(self, base_url: str, *, timeout: float = 60.0) -> None:
+        self._base_url = base_url.rstrip("/")
+        self._timeout = timeout
 
+    def normalize_raw(self, hgvs: str) -> dict[str, Any]:
+        """Return the upstream ``/api/normalize/<description>`` response unchanged.
 
-def normalize(hgvs: str) -> dict[str, Any]:
-    """Return a trimmed normalize response; raise :class:`MutalyzerError` on failure.
+        For frameshift inputs short-circuits to our local canonicalization
+        without hitting the API (upstream doesn't normalize frameshifts).
+        """
+        if _FS_PATTERN.search(hgvs.split(":", 1)[-1]):
+            return _normalize_frameshift(hgvs)
+        url = f"{self._base_url}/api/normalize/{quote(hgvs, safe='')}"
+        try:
+            response = httpx.get(url, timeout=self._timeout)
+            response.raise_for_status()
+        except httpx.HTTPError as e:
+            raise MutalyzerError("UPSTREAM_ERROR", str(e)) from e
+        return cast("dict[str, Any]", response.json())
 
-    Used by the Phase 6 pipeline orchestrator.
-    """
-    response = normalize_raw(hgvs)
-    error = _extract_error(response)
-    if error:
-        raise MutalyzerError(code=error[0], message=error[1])
-    return _trim(response)
+    def normalize(self, hgvs: str) -> dict[str, Any]:
+        """Return a trimmed normalize response; raise :class:`MutalyzerError` on failure."""
+        response = self.normalize_raw(hgvs)
+        error = _extract_error(response)
+        if error:
+            raise MutalyzerError(code=error[0], message=error[1])
+        return _trim(response)
 
-
-def back_translate(hgvsp: str) -> list[str]:
-    """Back-translate a protein HGVS description to coding-variant alternatives."""
-    if _FS_PATTERN.search(hgvsp.split(":", 1)[-1]):
-        raise MutalyzerError(
-            "FRAMESHIFT_UNSUPPORTED",
-            "back-translation of frameshift variants not supported",
-        )
-    return list(_mt_back_translate(hgvsp))
+    def back_translate(self, hgvsp: str) -> list[str]:
+        """Back-translate a protein HGVS description to coding-variant alternatives."""
+        if _FS_PATTERN.search(hgvsp.split(":", 1)[-1]):
+            raise MutalyzerError(
+                "FRAMESHIFT_UNSUPPORTED",
+                "back-translation of frameshift variants not supported",
+            )
+        url = f"{self._base_url}/api/back_translate/{quote(hgvsp, safe='')}"
+        try:
+            response = httpx.get(url, timeout=self._timeout)
+            response.raise_for_status()
+        except httpx.HTTPError as e:
+            raise MutalyzerError("UPSTREAM_ERROR", str(e)) from e
+        result = response.json()
+        if not isinstance(result, list):
+            raise MutalyzerError(
+                "UPSTREAM_ERROR",
+                f"expected list from back_translate, got {type(result).__name__}",
+            )
+        return [str(x) for x in result]

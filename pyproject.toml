@@ -22,9 +22,6 @@ dependencies = [
     "argon2-cffi>=23.1",
     "pyyaml>=6.0",
     "structlog>=24.4",
-    "mutalyzer>=3.1.1",
-    "setuptools<81",
-    "defusedxml>=0.7.1",
 ]
 
 [dependency-groups]

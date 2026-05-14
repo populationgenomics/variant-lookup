@@ -21,15 +21,22 @@ Per-variant chain:
 
 ## What runs where
 
-Two services in compose (plus an nginx sidecar for TLS):
+Four services in compose:
 
 | Service | Purpose | Process boundary | License |
 |---|---|---|---|
-| `gateway` (FastAPI, ours) | REST API, parsing/cleanup, Mutalyzer calls (in-process), echtvar subprocess, NCBI HTTP calls, VV HTTP calls, response assembly | one Python process | MIT |
+| `gateway` (FastAPI, ours) | REST API, parsing/cleanup, echtvar subprocess, NCBI HTTP calls, Mutalyzer HTTP calls, VV HTTP calls, response assembly | one (or more) Python process(es) | MIT |
+| `mutalyzer-api` (upstream `mutalyzer-api` PyPI package) | HGVS normalize + back-translate over HTTP, backed by Mutalyzer 3 + mutalyzer-retriever's file cache | sibling container, HTTP only | MIT |
 | `variantvalidator` (upstream image, unmodified) | HGVS → GRCh38 pseudo-VCF + MANE-select transcripts | sibling container, HTTP only | **AGPL-3.0-only** |
-| `nginx` (sidecar) | TLS termination, reverse proxy in front of `gateway` | sibling container | BSD-2-Clause |
+| `nginx` (sidecar) | TLS termination + cluster-wide in-flight rate limit in front of `gateway` | sibling container | BSD-2-Clause |
 
-Mutalyzer is **in-process** because the library is MIT-licensed and importable. echtvar is **subprocess** because it's a CLI tool; the wall-clock overhead is `max(per-subprocess startup)` across the chromosomes in the batch (each ~30-100 ms for fork + binary load + zip open of a ~150 MB per-chrom archive), since the dispatch is parallel. VariantValidator is **HTTP-only across a container boundary** because it is AGPL — see §"AGPL boundary".
+Mutalyzer sits behind the same HTTP boundary VV does. The boundary isn't license-driven this time (mutalyzer is MIT either way) — it's operational:
+
+  - mutalyzer-retriever's reference-sequence LRU stays in one container's processes; scaling gateway workers no longer multiplies the cache footprint.
+  - the gateway image stays lean (no biopython, no mutalyzer-retriever, no mutalyzer).
+  - mutalyzer-api can be scaled or replaced independently of the gateway.
+
+echtvar is **subprocess** because it's a CLI tool; the wall-clock overhead is `max(per-subprocess startup)` across the chromosomes in the batch (each ~30-100 ms for fork + binary load + zip open of a ~150 MB per-chrom archive), since the dispatch is parallel. VariantValidator is **HTTP-only across a container boundary** because it is AGPL — see §"AGPL boundary".
 
 VariantValidator's deployment has internal dependencies (MySQL + PostgreSQL + SeqRepo containers) that come from the upstream `docker-compose.yml`. We **vendor `rest_variantValidator` under `vendor/`** and bring the upstream compose stack up alongside ours. The vendored sources are **not part of our service** — they belong to the AGPL surface and live outside `src/`.
 
@@ -214,6 +221,11 @@ ${DATA_DIR}/
   refseq/
     refseq_processed.json               # MANE-Select / RefSeq-Select index by gene symbol
                                         # (also indexed by versionless accession for autocomplete)
+  mutalyzer/
+    cache/                              # mutalyzer-retriever file cache:
+                                        # <r_id>.annotations + <r_id>.sequence per accession.
+                                        # Populated by setup.sh refresh-mutalyzer-cache.
+                                        # Mounted read-write into the mutalyzer-api container.
   variantvalidator/                     # belongs to the AGPL VV service.
                                         # Upstream's defaults point at $HOME and
                                         # leave the DBs in the container layer;
@@ -260,9 +272,9 @@ VariantValidator is licensed **AGPL-3.0-only**. Our service is MIT. The boundary
 - **DON'T** modify VariantValidator. Any patch to VV must be applied in a fork that is itself AGPL — and AGPL §13 then requires the fork's source to be available to anyone interacting with the service over the network.
 - **DON'T** remove the AGPL attribution / upstream-source link from documentation.
 
-### Why Mutalyzer is different
+### Why Mutalyzer is the same shape
 
-Mutalyzer is MIT-licensed. Importing `mutalyzer` directly in the gateway is fine and doesn't constrain our license. If Mutalyzer ever relicenses (e.g. to GPL/AGPL), revisit and move it across the same HTTP boundary VV sits behind.
+Mutalyzer is MIT-licensed, so the network boundary is not license-required. We use it anyway for operational reasons (single reference-sequence LRU, lean gateway image, independent scaling). If Mutalyzer ever relicenses (e.g. to GPL/AGPL), no change is needed — we already cross the boundary.
 
 ### If the boundary needs to move
 
@@ -279,7 +291,7 @@ Neither is in scope for v1.
 - `src/variant_lookup/api.py` — FastAPI routes, auth, request validation, response shaping, `meta` assembly.
 - `src/variant_lookup/pipeline.py` — orchestrates the per-variant chain (parse → normalize → coords → freq).
 - `src/variant_lookup/normalize.py` — variant-string cleanup regex + HGVS construction.
-- `src/variant_lookup/mutalyzer_client.py` — in-process wrapper around `mutalyzer.normalizer.normalize` and `mutalyzer.back_translator.back_translate`. Translates Mutalyzer's error shapes into our `error` codes.
+- `src/variant_lookup/mutalyzer_client.py` — HTTP client for the sibling mutalyzer-api container. Handles frameshift canonicalization locally before delegating; translates Mutalyzer's error shapes into our `error` codes.
 - `src/variant_lookup/variantvalidator_client.py` — HTTP client for the sibling VV container.
 - `src/variant_lookup/echtvar.py` — sorted-VCF generation, `echtvar anno` subprocess, annotated-VCF parsing, hemizygote derivation.
 - `src/variant_lookup/ncbi.py` — rsID resolution against NCBI E-utils. External HTTP. API key in env.
@@ -288,6 +300,13 @@ Neither is in scope for v1.
 - `src/variant_lookup/health.py` — `/healthz`, `/readyz`.
 - `src/variant_lookup/config.py` — env-var loading and validation. **All paths and URLs come from env.**
 - `scripts/setup.sh` — one-shot bootstrap and per-dataset refresh; see "Reference data layout" for the subcommands.
+
+### `mutalyzer-api` (MIT, packaged as `mutalyzer-api` on PyPI)
+
+- Image built locally from `docker/mutalyzer-api/Dockerfile`: `pip install mutalyzer-api gunicorn` on top of `python:3.13-slim`.
+- Runs `gunicorn 'mutalyzer_api.endpoints:app' --workers ${MUTALYZER_API_WORKERS:-4}` behind an entrypoint that generates the `mutalyzer-retriever` config file from env vars (`NCBI_EUTILS_EMAIL`, `NCBI_EUTILS_API_KEY`).
+- Cache: bind-mount `${DATA_DIR}/mutalyzer/cache/` into `/data/mutalyzer/cache/`. Populated by `scripts/setup.sh refresh-mutalyzer-cache`. Each gunicorn worker maintains its own in-process LRU on top of the shared file cache.
+- The same image is reused as the cache populator: `docker run … variant-lookup-mutalyzer-api:latest populate-cache` runs upstream's `mutalyzer_retriever ncbi_assemblies …` and writes into the same cache directory.
 
 ### `variantvalidator` (vendored upstream sources)
 

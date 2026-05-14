@@ -4,9 +4,10 @@ from unittest.mock import MagicMock
 
 import pytest
 
-from variant_lookup import echtvar, mutalyzer_client, ncbi, pipeline
+from variant_lookup import echtvar, ncbi, pipeline
 from variant_lookup.config import Settings, get_settings
 from variant_lookup.models import Frequency, VariantInput
+from variant_lookup.mutalyzer_client import MutalyzerClient, MutalyzerError
 from variant_lookup.ncbi import RsIDResolution
 from variant_lookup.refseq import GeneAccessions, RefSeqIndex
 from variant_lookup.variantvalidator_client import (
@@ -51,8 +52,23 @@ def vv_client() -> MagicMock:
 
 
 @pytest.fixture
-def pipe(settings: Settings, refseq_index: RefSeqIndex, vv_client: MagicMock) -> pipeline.Pipeline:
-    return pipeline.Pipeline(settings=settings, refseq_index=refseq_index, vv_client=vv_client)
+def mut_client() -> MagicMock:
+    return MagicMock(spec=MutalyzerClient)
+
+
+@pytest.fixture
+def pipe(
+    settings: Settings,
+    refseq_index: RefSeqIndex,
+    vv_client: MagicMock,
+    mut_client: MagicMock,
+) -> pipeline.Pipeline:
+    return pipeline.Pipeline(
+        settings=settings,
+        refseq_index=refseq_index,
+        vv_client=vv_client,
+        mutalyzer_client=mut_client,
+    )
 
 
 def _fake_freq() -> Frequency:
@@ -73,13 +89,10 @@ def _fake_freq() -> Frequency:
 def test_coding_variant_resolves_to_one_normalized(
     pipe: pipeline.Pipeline,
     vv_client: MagicMock,
+    mut_client: MagicMock,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    monkeypatch.setattr(
-        mutalyzer_client,
-        "normalize",
-        lambda _: {"normalized_description": "NM_006749.5:c.1240G>T"},
-    )
+    mut_client.normalize.return_value = {"normalized_description": "NM_006749.5:c.1240G>T"}
     vv_client.mane_select.return_value = VVResult(
         pseudo_vcf="8-42437272-C-A",
         hgvs_c="NM_006749.5:c.1240G>T",
@@ -105,18 +118,16 @@ def test_coding_variant_resolves_to_one_normalized(
 def test_protein_variant_fans_out_to_multiple_candidates(
     pipe: pipeline.Pipeline,
     vv_client: MagicMock,
+    mut_client: MagicMock,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    monkeypatch.setattr(
-        mutalyzer_client,
-        "normalize",
-        lambda _: {"normalized_description": "NM_006749.5(NP_006740.1):p.Glu414Ter"},
-    )
-    monkeypatch.setattr(
-        mutalyzer_client,
-        "back_translate",
-        lambda _: ["NM_006749.5:c.1240G>T", "NM_006749.5:c.1240G>A"],
-    )
+    mut_client.normalize.return_value = {
+        "normalized_description": "NM_006749.5(NP_006740.1):p.Glu414Ter"
+    }
+    mut_client.back_translate.return_value = [
+        "NM_006749.5:c.1240G>T",
+        "NM_006749.5:c.1240G>A",
+    ]
     vv_client.mane_select.side_effect = [
         VVResult(
             pseudo_vcf="8-42437272-C-A",
@@ -146,6 +157,7 @@ def test_protein_variant_fans_out_to_multiple_candidates(
 def test_rsid_input_routes_to_ncbi(
     pipe: pipeline.Pipeline,
     vv_client: MagicMock,
+    mut_client: MagicMock,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     monkeypatch.setattr(
@@ -158,11 +170,7 @@ def test_rsid_input_routes_to_ncbi(
             gene="SLC20A2",
         ),
     )
-    monkeypatch.setattr(
-        mutalyzer_client,
-        "normalize",
-        lambda _: {"normalized_description": "NM_006749.5:c.1240G>T"},
-    )
+    mut_client.normalize.return_value = {"normalized_description": "NM_006749.5:c.1240G>T"}
     vv_client.mane_select.return_value = VVResult(
         pseudo_vcf="8-42437272-C-A",
         hgvs_c="NM_006749.5:c.1240G>T",
@@ -199,13 +207,10 @@ def test_cleanup_failure_produces_error_result(pipe: pipeline.Pipeline) -> None:
 def test_vv_failure_produces_error_result(
     pipe: pipeline.Pipeline,
     vv_client: MagicMock,
+    mut_client: MagicMock,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    monkeypatch.setattr(
-        mutalyzer_client,
-        "normalize",
-        lambda _: {"normalized_description": "NM_006749.5:c.1240G>T"},
-    )
+    mut_client.normalize.return_value = {"normalized_description": "NM_006749.5:c.1240G>T"}
     vv_client.mane_select.side_effect = VariantValidatorError("NO_GENOMIC_COORDS", "nope")
 
     response = pipe.process_batch(
@@ -220,12 +225,9 @@ def test_vv_failure_produces_error_result(
 
 def test_mutalyzer_normalize_failure_produces_error_result(
     pipe: pipeline.Pipeline,
-    monkeypatch: pytest.MonkeyPatch,
+    mut_client: MagicMock,
 ) -> None:
-    def raise_(_: str) -> dict[str, object]:
-        raise mutalyzer_client.MutalyzerError("EREF", "reference not found")
-
-    monkeypatch.setattr(mutalyzer_client, "normalize", raise_)
+    mut_client.normalize.side_effect = MutalyzerError("EREF", "reference not found")
 
     response = pipe.process_batch(
         [VariantInput(id="v1", gene="SLC20A2", variant="c.1240G>T")],
@@ -240,13 +242,10 @@ def test_mutalyzer_normalize_failure_produces_error_result(
 def test_partial_batch_mixes_success_and_error(
     pipe: pipeline.Pipeline,
     vv_client: MagicMock,
+    mut_client: MagicMock,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    monkeypatch.setattr(
-        mutalyzer_client,
-        "normalize",
-        lambda _: {"normalized_description": "NM_006749.5:c.1240G>T"},
-    )
+    mut_client.normalize.return_value = {"normalized_description": "NM_006749.5:c.1240G>T"}
     vv_client.mane_select.return_value = VVResult(
         pseudo_vcf="8-42437272-C-A",
         hgvs_c="NM_006749.5:c.1240G>T",
@@ -292,14 +291,11 @@ def test_meta_block_populated(
 def test_meta_durations_total_covers_per_stage(
     pipe: pipeline.Pipeline,
     vv_client: MagicMock,
+    mut_client: MagicMock,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """total should be >= sum of per-stage durations (modulo rounding)."""
-    monkeypatch.setattr(
-        mutalyzer_client,
-        "normalize",
-        lambda _: {"normalized_description": "NM_006749.5:c.1240G>T"},
-    )
+    mut_client.normalize.return_value = {"normalized_description": "NM_006749.5:c.1240G>T"}
     vv_client.mane_select.return_value = VVResult(
         pseudo_vcf="8-42437272-C-A",
         hgvs_c="NM_006749.5:c.1240G>T",
@@ -326,14 +322,11 @@ def test_meta_durations_total_covers_per_stage(
 def test_fully_qualified_input_works_without_gene(
     pipe: pipeline.Pipeline,
     vv_client: MagicMock,
+    mut_client: MagicMock,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """A NC_…:g.… input has all info inline — `gene` is optional."""
-    monkeypatch.setattr(
-        mutalyzer_client,
-        "normalize",
-        lambda _: {"normalized_description": "NC_000016.10:g.2116896C>A"},
-    )
+    mut_client.normalize.return_value = {"normalized_description": "NC_000016.10:g.2116896C>A"}
     vv_client.mane_select.return_value = VVResult(
         pseudo_vcf="16-2116896-C-A",
         hgvs_c="NM_001009944.3:c.1543G>T",

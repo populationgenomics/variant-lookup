@@ -6,15 +6,30 @@ from httpx import Response
 from variant_lookup import versions
 
 
-def test_mutalyzer_version_resolved_from_metadata() -> None:
-    """importlib.metadata returns mutalyzer's installed version (a PEP 440 string)."""
+@respx.mock
+def test_mutalyzer_version_parses_version_endpoint() -> None:
+    base = "http://mutalyzer-api:5000"
+    respx.get(f"{base}/api/version").mock(
+        return_value=Response(200, json={"mutalyzer": "3.1.1", "api": "2.2"})
+    )
     versions.mutalyzer_version.cache_clear()
-    result = versions.mutalyzer_version()
-    # Don't pin to an exact version — just that it isn't the fallback.
-    assert result != "unknown"
-    assert result  # non-empty
-    # PEP 440 — first character is a digit
-    assert result[0].isdigit()
+    assert versions.mutalyzer_version(base) == "3.1.1"
+
+
+@respx.mock
+def test_mutalyzer_version_unknown_on_http_error() -> None:
+    base = "http://mutalyzer-api-down:5000"
+    respx.get(f"{base}/api/version").mock(return_value=Response(500))
+    versions.mutalyzer_version.cache_clear()
+    assert versions.mutalyzer_version(base) == "unknown"
+
+
+@respx.mock
+def test_mutalyzer_version_unknown_on_missing_field() -> None:
+    base = "http://mutalyzer-api-weird:5000"
+    respx.get(f"{base}/api/version").mock(return_value=Response(200, json={"api": "2.2"}))
+    versions.mutalyzer_version.cache_clear()
+    assert versions.mutalyzer_version(base) == "unknown"
 
 
 @respx.mock

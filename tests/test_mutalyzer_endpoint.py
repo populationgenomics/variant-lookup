@@ -20,9 +20,10 @@ def test_normalize_returns_library_dict() -> None:
         "normalized_description": "NM_003002.2:c.274G>T",
         "protein": {"description": "..."},
     }
-    with patch(
-        "variant_lookup.api.mutalyzer_client.normalize_raw", return_value=fake_response
-    ) as mock:
+    # Patch the MutalyzerClient class so instantiation in the route returns
+    # a mock whose .normalize_raw returns our fake.
+    with patch("variant_lookup.api.MutalyzerClient") as MC:
+        MC.return_value.normalize_raw.return_value = fake_response
         client = TestClient(create_app())
         response = client.get(
             "/mutalyzer/normalize/NM_003002.2:c.274G%3ET",
@@ -31,7 +32,7 @@ def test_normalize_returns_library_dict() -> None:
     assert response.status_code == 200
     assert response.json() == fake_response
     # Path param decoding: the `>` is %3E-encoded by the client.
-    mock.assert_called_once_with("NM_003002.2:c.274G>T")
+    MC.return_value.normalize_raw.assert_called_once_with("NM_003002.2:c.274G>T")
 
 
 def test_back_translate_requires_auth() -> None:
@@ -42,7 +43,8 @@ def test_back_translate_requires_auth() -> None:
 
 def test_back_translate_returns_list() -> None:
     fake_list = ["NM_003002.4:c.(276C>G)", "NM_003002.4:c.(276C>A)"]
-    with patch("variant_lookup.api.mutalyzer_client.back_translate", return_value=fake_list):
+    with patch("variant_lookup.api.MutalyzerClient") as MC:
+        MC.return_value.back_translate.return_value = fake_list
         client = TestClient(create_app())
         response = client.get(
             "/mutalyzer/back_translate/NP_002993.1:p.Asp92Glu",
@@ -53,10 +55,8 @@ def test_back_translate_returns_list() -> None:
 
 
 def test_back_translate_frameshift_returns_422() -> None:
-    def raise_frameshift(_: str) -> list[str]:
-        raise MutalyzerError("FRAMESHIFT_UNSUPPORTED", "no.")
-
-    with patch("variant_lookup.api.mutalyzer_client.back_translate", side_effect=raise_frameshift):
+    with patch("variant_lookup.api.MutalyzerClient") as MC:
+        MC.return_value.back_translate.side_effect = MutalyzerError("FRAMESHIFT_UNSUPPORTED", "no.")
         client = TestClient(create_app())
         response = client.get(
             "/mutalyzer/back_translate/NP_002993.1:p.Arg100fs",

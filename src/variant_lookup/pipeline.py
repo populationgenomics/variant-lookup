@@ -21,7 +21,7 @@ from collections.abc import Iterator
 from contextlib import contextmanager
 from dataclasses import dataclass, field
 
-from variant_lookup import __version__, echtvar, mutalyzer_client, ncbi, normalize, versions
+from variant_lookup import __version__, echtvar, ncbi, normalize, versions
 from variant_lookup.config import Settings
 from variant_lookup.models import (
     NormalizedVariant,
@@ -31,6 +31,7 @@ from variant_lookup.models import (
     VariantInput,
     VariantResult,
 )
+from variant_lookup.mutalyzer_client import MutalyzerClient, MutalyzerError
 from variant_lookup.refseq import RefSeqIndex
 from variant_lookup.variantvalidator_client import (
     VariantValidatorClient,
@@ -57,6 +58,7 @@ class Pipeline:
     settings: Settings
     refseq_index: RefSeqIndex
     vv_client: VariantValidatorClient
+    mutalyzer_client: MutalyzerClient
     # Per-request stage timings (ns). Populated as process_batch runs and read
     # by _meta to fill ResponseMeta.durations_ms. Pipeline is constructed
     # per-request in api._lookup_variants so this state is request-scoped.
@@ -127,8 +129,8 @@ class Pipeline:
         cleaned = self._to_cleaned_variant(variant, genome_build)
         with self._timed("normalize"):
             try:
-                normalized = mutalyzer_client.normalize(str(cleaned))
-            except mutalyzer_client.MutalyzerError as e:
+                normalized = self.mutalyzer_client.normalize(str(cleaned))
+            except MutalyzerError as e:
                 raise _PipelineError(
                     code=f"NORMALIZATION_{e.code}",
                     message=e.message,
@@ -141,8 +143,8 @@ class Pipeline:
 
         with self._timed("back_translate"):
             try:
-                return mutalyzer_client.back_translate(normalized_str)
-            except mutalyzer_client.MutalyzerError as e:
+                return self.mutalyzer_client.back_translate(normalized_str)
+            except MutalyzerError as e:
                 raise _PipelineError(
                     code=f"BACK_TRANSLATE_{e.code}", message=e.message, upstream="mutalyzer"
                 ) from e
@@ -216,7 +218,7 @@ class Pipeline:
             reference="GRCh38",
             gnomad=self.settings.gnomad_version,
             variantvalidator=versions.variantvalidator_version(self.settings.vv_base_url),
-            mutalyzer=versions.mutalyzer_version(),
+            mutalyzer=versions.mutalyzer_version(self.settings.mutalyzer_base_url),
             timestamp=datetime.datetime.now(tz=datetime.UTC).isoformat(),
             durations_ms={
                 stage: round(self._durations_ns.get(stage, 0) / 1_000_000) for stage in _STAGES

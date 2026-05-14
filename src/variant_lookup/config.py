@@ -19,6 +19,10 @@ class Settings(BaseSettings):
         ...,
         description="Base URL of the sibling VariantValidator container (HTTP only).",
     )
+    mutalyzer_base_url: str = Field(
+        ...,
+        description="Base URL of the sibling mutalyzer-api container (HTTP only).",
+    )
     echtvar_bin: str = Field("echtvar", description="echtvar binary, expected on PATH.")
     echtvar_archives_dir: Path = Field(
         ...,
