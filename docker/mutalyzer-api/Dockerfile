@@ -30,9 +30,14 @@ ARG GUNICORN_VERSION=23.0.0
 
 RUN python -m venv /opt/venv
 ENV PATH=/opt/venv/bin:$PATH
+# `setuptools<81` is required at runtime: mutalyzer_api's __init__.py does
+# `from pkg_resources import get_distribution`, and setuptools 81+ removed
+# the pkg_resources shim. Python 3.13's venv doesn't ship setuptools by
+# default, so we have to install a compatible version explicitly.
 RUN pip install --no-cache-dir \
         "mutalyzer-api==${MUTALYZER_API_VERSION}" \
-        "gunicorn==${GUNICORN_VERSION}"
+        "gunicorn==${GUNICORN_VERSION}" \
+        "setuptools<81"
 
 
 FROM python:3.13-slim AS runtime
