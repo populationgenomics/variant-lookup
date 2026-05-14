@@ -4,7 +4,8 @@ from unittest.mock import MagicMock
 
 import pytest
 
-from variant_lookup import echtvar, ncbi, pipeline
+import variant_lookup.pipeline as pipeline
+from variant_lookup import echtvar, ncbi
 from variant_lookup.config import Settings, get_settings
 from variant_lookup.models import Frequency, VariantInput
 from variant_lookup.mutalyzer_client import MutalyzerClient, MutalyzerError
